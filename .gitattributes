@@ -1,0 +1,7 @@
+# Keep line endings consistent no matter where the repo is checked out.
+* text=auto eol=lf
+
+# Binary files that must not be touched.
+*.png binary
+*.wav binary
+*.mp3 binary
