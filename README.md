@@ -120,11 +120,15 @@ or paste it into **Setup…** in the window.
 
 | Platform | Capture method | Status |
 | --- | --- | --- |
-| Windows | WASAPI loopback (`IAudioClient` with the loopback flag), via `soundcard` | **Tested here** |
-| macOS | ScreenCaptureKit, via a small Swift helper in `tools/` | **Written, not verified** |
-| Linux | PipeWire/PulseAudio monitor source, via `soundcard` | **Written, not verified** |
+| Windows | WASAPI loopback (`IAudioClient` with the loopback flag), via `soundcard` | **Tested** |
+| macOS | ScreenCaptureKit, via a small Swift helper in `tools/` | **Written, never compiled** |
+| Linux | PipeWire/PulseAudio monitor source, via `soundcard` | **Written, not tested** |
 
 ### macOS
+
+**This part is written but has never been run.** It was developed on Windows,
+where no Swift compiler exists, so the helper has not even been compiled yet.
+Expect to fix a compile error or two on the first try.
 
 ScreenCaptureKit only hands out sample buffers that native code can decode,
 so the capture lives in `tools/SystemAudioCapture.swift`. Build it once:
@@ -135,9 +139,15 @@ swiftc -O -o tools/SystemAudioCapture tools/SystemAudioCapture.swift
 
 The app builds it automatically the first time it runs if `swiftc` is
 available. macOS asks for Screen Recording permission the first time the
-capture starts.
+capture starts, and ScreenCaptureKit needs macOS 13 or newer.
+
+If you do get it working, or hit a problem, an issue on the repository would
+be the place to say so.
 
 ### Linux
+
+**This part is written but has never been run.** It was developed on Windows,
+so it has not been tested against a real PipeWire or PulseAudio server.
 
 PipeWire and PulseAudio both expose a monitor source for the default output
 sink, and `soundcard` opens that source. If the monitor source is missing,
