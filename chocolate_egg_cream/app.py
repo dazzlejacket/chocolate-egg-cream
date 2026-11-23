@@ -54,11 +54,14 @@ class EggCream:
         self._save_settings = save_settings or settings_module.save
         self.tracks = TrackState(confirmations_required=int(settings["confirmations_required"]))
         self.scrobblers = self._build_scrobblers(settings)
-        self._scrobbled: set[str] = set(settings.get("scrobbled", []))
+        # Keep insertion order so trimming to the last 500 drops the oldest songs.
+        self._scrobbled: dict[str, None] = dict.fromkeys(settings.get("scrobbled", []))
         self._running = False
         self._task: asyncio.Task | None = None
         self._now_playing_for: str | None = None
         self._last_now_playing_at: float | None = None
+        self._heard_audio: bool | None = None
+        self.history: list[Recognition] = []
         self.on_event = None  # optional callback for the display
 
     # ---------------------------------------------------------------- setup
@@ -81,6 +84,14 @@ class EggCream:
             )
         return scrobblers
 
+    def reload_settings(self, settings: dict) -> None:
+        """Apply updated settings (e.g. from Setup) without restarting the app."""
+        self.settings = settings
+        self.scrobblers = self._build_scrobblers(settings)
+        max_skew = float(settings.get("max_skew", 0) or 0)
+        if hasattr(self.recognizer, "max_skew"):
+            self.recognizer.max_skew = max_skew if max_skew > 0 else None
+
     @property
     def running(self) -> bool:
         return self._running
@@ -90,8 +101,17 @@ class EggCream:
         return self.tracks.current
 
     @property
+    def candidate(self) -> Recognition | None:
+        return self.tracks.candidate
+
+    @property
     def playtime(self) -> float:
         return self.tracks.playtime
+
+    @property
+    def heard_audio(self) -> bool | None:
+        """Whether the most recent sample had audio (None before first sample)."""
+        return self._heard_audio
 
     # ------------------------------------------------------------- control
 
@@ -100,10 +120,12 @@ class EggCream:
         if self._running:
             return
         try:
-            self.capture.open()
-        except Exception:
+            await asyncio.to_thread(self.capture.open)
+        except Exception as exc:
             self._running = False
+            self._emit("error", str(exc))
             raise
+        self._heard_audio = None
         self._running = True
         self._task = asyncio.create_task(self._loop())
         self._emit("started", None)
@@ -119,13 +141,16 @@ class EggCream:
                 pass
             self._task = None
         try:
-            self.capture.close()
+            await asyncio.to_thread(self.capture.close)
         except Exception:  # noqa: BLE001
             pass
         # The song that was playing is over now.
         finished = self.tracks.finish_current(time.time())
         if finished is not None:
             await self._finish(finished)
+        self._now_playing_for = None
+        self._last_now_playing_at = None
+        self._heard_audio = None
         self._emit("stopped", None)
 
     async def shutdown(self) -> None:
@@ -138,19 +163,27 @@ class EggCream:
     async def _loop(self) -> None:
         interval = float(self.settings["interval_seconds"])
         sample_seconds = float(self.settings["sample_seconds"])
+        consecutive_capture_errors = 0
         try:
             while self._running:
                 started = time.time()
                 try:
                     samples = await asyncio.to_thread(self.capture.read, sample_seconds)
+                    consecutive_capture_errors = 0
                 except asyncio.CancelledError:
                     raise
                 except Exception as exc:  # noqa: BLE001
+                    consecutive_capture_errors += 1
                     log.warning("Audio capture failed: %s", exc)
+                    if consecutive_capture_errors >= 3:
+                        self._running = False
+                        self._emit("error", str(exc))
+                        return
                     await asyncio.sleep(2)
                     continue
 
                 heard = not is_silent(samples)
+                self._heard_audio = heard
                 recognition = None
                 if heard:
                     recognition = await self.recognizer.recognize(
@@ -176,9 +209,10 @@ class EggCream:
                 await asyncio.sleep(max(0.0, interval - elapsed))
         except asyncio.CancelledError:
             raise
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
             log.exception("The recognition loop stopped unexpectedly")
-            self._emit("error", None)
+            self._running = False
+            self._emit("error", str(exc))
 
     # ------------------------------------------------------------- helpers
 
@@ -206,7 +240,8 @@ class EggCream:
         submitted = False
         timestamp = int(finished.started_at)
         for scrobbler in active:
-            ok = scrobbler.scrobble(
+            ok = await asyncio.to_thread(
+                scrobbler.scrobble,
                 artist=track.artist,
                 title=track.title,
                 album=track.album,
@@ -223,8 +258,9 @@ class EggCream:
             )
 
         if submitted:
-            self._scrobbled.add(identity)
+            self._scrobbled[identity] = None
             self._remember_scrobbled()
+            self._emit("scrobbled", track)
 
     def _qualifies(self, finished: FinishedTrack) -> bool:
         """Did the track play long enough to count as a real listen?"""
@@ -238,14 +274,20 @@ class EggCream:
         track = self.tracks.current
         if track is None:
             return
+        is_new = self._now_playing_for != track.identity
         self._now_playing_for = track.identity
         self._last_now_playing_at = time.time()
+        if is_new:
+            if not self.history or self.history[0].identity != track.identity:
+                self.history.insert(0, track)
+                del self.history[25:]
         log.info("Now playing: %s", track.label)
         for scrobbler in self.scrobblers:
             if not scrobbler.configured:
                 continue
             try:
-                scrobbler.now_playing(
+                await asyncio.to_thread(
+                    scrobbler.now_playing,
                     artist=track.artist,
                     title=track.title,
                     album=track.album,
@@ -256,13 +298,14 @@ class EggCream:
         self._emit("now_playing", track)
 
     def _remember_scrobbled(self) -> None:
-        recent = list(self._scrobbled)[-500:]
+        recent = list(self._scrobbled.keys())[-500:]
+        self._scrobbled = dict.fromkeys(recent)
         self.settings["scrobbled"] = recent
         self._save_settings(self.settings)
 
-    def _emit(self, kind: str, track: Recognition | None) -> None:
+    def _emit(self, kind: str, payload) -> None:
         if self.on_event is not None:
             try:
-                self.on_event(kind, track)
+                self.on_event(kind, payload)
             except Exception:  # noqa: BLE001
                 pass

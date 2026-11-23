@@ -129,6 +129,77 @@ def test_wav_roundtrip() -> None:
     check("the wav has the right length", len(data) == 44 + 10)
 
 
+def test_lastfm_sign_and_spanish_utf8() -> None:
+    print("lastfm signing & Spanish UTF-8")
+    from chocolate_egg_cream.scrobble.lastfm import sign
+
+    params = {
+        "method": "track.scrobble",
+        "artist": "Café Tacvba",
+        "track": "¿Cómo Te Extraño Mi Amor?",
+        "api_key": "abc",
+    }
+    sig_without_format = sign(params, "secret")
+    params_with_format = dict(params, format="json", callback="cb")
+    sig_with_format = sign(params_with_format, "secret")
+    check("format and callback are excluded from api_sig", sig_without_format == sig_with_format)
+    check("api_sig is a 32-char md5 hex digest", len(sig_without_format) == 32)
+
+
+def test_song_urls_spanish() -> None:
+    print("song lookup urls (Spanish)")
+    from chocolate_egg_cream.gui import build_song_urls
+
+    track = song("Natalia Lafourcade", "Hasta la Raíz")
+    urls = build_song_urls(track)
+    check("translate url uses es->en", "sl=es&tl=en" in urls["translate"])
+    check("translate url encodes Spanish title", "Hasta%20la%20Ra%C3%ADz" in urls["translate"])
+    check("lyrics url includes english translation", "english+translation" in urls["lyrics"])
+    check("youtube url targets search_query", "youtube.com/results?search_query=" in urls["youtube"])
+
+
+def test_mac_capture_streaming_and_stderr() -> None:
+    print("mac capture stream & stderr")
+    import io
+    import time
+    from chocolate_egg_cream.capture.macos import MacCapture
+
+    class FakeProc:
+        def __init__(self, stdout_bytes: bytes, stderr_bytes: bytes = b"") -> None:
+            self.stdout = io.BytesIO(stdout_bytes)
+            self.stderr = io.BytesIO(stderr_bytes)
+            self._rc = None
+
+        def poll(self):
+            return self._rc
+
+        def terminate(self):
+            self._rc = 0
+
+        def wait(self, timeout=None):
+            return 0
+
+        def kill(self):
+            self._rc = -9
+
+    # Test stderr error reporting when helper stops early
+    cap = MacCapture(sample_rate=48000)
+    cap._process = FakeProc(b"", b"error: Screen Recording permission is required.\n")
+    cap._stderr_lines.clear()
+    cap._eof = False
+    cap._drain_stderr()
+    cap._eof = True
+    try:
+        cap.read(0.1)
+        check("read raises on helper exit", False)
+    except RuntimeError as exc:
+        check(
+            "stderr message is surfaced in RuntimeError",
+            "Screen Recording permission" in str(exc),
+            str(exc),
+        )
+
+
 def main() -> int:
     for test in (
         test_confirm_twice,
@@ -137,6 +208,9 @@ def main() -> int:
         test_playtime,
         test_identity,
         test_wav_roundtrip,
+        test_lastfm_sign_and_spanish_utf8,
+        test_song_urls_spanish,
+        test_mac_capture_streaming_and_stderr,
     ):
         test()
     print()

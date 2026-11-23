@@ -38,9 +38,11 @@ def check(name: str, condition: bool, detail: str = "") -> None:
 
 
 class FakeLastFM(BaseHTTPRequestHandler):
-    def do_GET(self):
-        query = parse_qs(urlparse(self.path).query)
-        CALLS.append({key: values[0] for key, values in query.items()})
+    def do_POST(self):
+        length = int(self.headers.get("Content-Length", "0"))
+        raw = self.rfile.read(length).decode("utf-8")
+        form = parse_qs(raw)
+        CALLS.append({key: values[0] for key, values in form.items()})
         body = json.dumps({"status": "ok"}).encode()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
@@ -170,6 +172,16 @@ async def main() -> int:
     check(
         "the request was signed",
         all(c.get("api_sig") for c in CALLS),
+    )
+    check(
+        "format=json was requested on every Last.fm call",
+        all(c.get("format") == "json" for c in CALLS),
+        str([c.get("format") for c in CALLS]),
+    )
+    check(
+        "session history recorded plays newest-first",
+        [t.title for t in app.history] == ["Song A", "Song B", "Song A"],
+        str([t.title for t in app.history]),
     )
     check(
         "the scrobbled songs were remembered",

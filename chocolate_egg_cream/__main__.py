@@ -2,6 +2,7 @@
 
     python -m chocolate_egg_cream             open the window
     python -m chocolate_egg_cream console     run in the terminal instead
+    python -m chocolate_egg_cream check       check audio capture & setup readiness
     python -m chocolate_egg_cream test        take one sample and recognise it
     python -m chocolate_egg_cream auth lastfm run the Last.fm authorisation
     python -m chocolate_egg_cream set <key> <value>   change one setting
@@ -95,17 +96,20 @@ def run_lastfm_auth(config: dict) -> int:
         return 1
 
     lastfm = LastFM(api_key=api_key, api_secret=api_secret)
-    url = lastfm.auth_url()
-    print(f"\nOpen this page and allow the app:\n  {url}\n", flush=True)
+    try:
+        token = lastfm.fetch_token()
+    except Exception as exc:  # noqa: BLE001
+        print(f"Could not request a Last.fm auth token: {exc}", flush=True)
+        return 1
+
+    url = lastfm.auth_url(token)
+    print(f"\nOpen this page and click 'Yes, allow access':\n  {url}\n", flush=True)
     try:
         webbrowser.open(url)
     except Exception:  # noqa: BLE001
         pass
 
-    token = input("Paste the token Last.fm shows you: ").strip()
-    if not token:
-        print("No token given, giving up.", flush=True)
-        return 1
+    input("Press Enter here once you have allowed the app in your browser... ")
 
     try:
         session_key = lastfm.exchange_token(token)
@@ -117,6 +121,52 @@ def run_lastfm_auth(config: dict) -> int:
     settings_module.save(config)
     print("Last.fm is authorised. You can run the app now.\n", flush=True)
     return 0
+
+
+# -------------------------------------------------------------------- check
+
+
+def run_check(config: dict) -> int:
+    """Verify Python, audio capture helper, GUI, and scrobbler setup."""
+    ok = True
+    print(f"Python: {sys.version.split()[0]} ({sys.platform})", flush=True)
+
+    try:
+        import tkinter  # noqa: F401
+        print("GUI (tkinter): ready", flush=True)
+    except ImportError as exc:
+        print(f"GUI (tkinter): missing ({exc}) -- console mode will still work", flush=True)
+
+    if sys.platform == "darwin":
+        from .capture.macos import helper_path
+
+        try:
+            binary = helper_path()
+            print(f"macOS audio helper: ready ({binary})", flush=True)
+            print(
+                "  Note: Make sure Screen Recording permission is enabled for your "
+                "Terminal in System Settings -> Privacy & Security -> Screen & System Audio Recording.",
+                flush=True,
+            )
+        except Exception as exc:  # noqa: BLE001
+            print(f"macOS audio helper: NOT READY -- {exc}", flush=True)
+            ok = False
+    else:
+        print(f"Audio capture backend: {sys.platform}", flush=True)
+
+    enabled = config.get("enabled_services", [])
+    if "lastfm" in enabled:
+        lfm_ready = all(
+            config.get(k) for k in ("lastfm_api_key", "lastfm_api_secret", "lastfm_session_key")
+        )
+        print(f"Last.fm: {'ready' if lfm_ready else 'needs setup (open Setup in the app)'}", flush=True)
+    if "listenbrainz" in enabled:
+        lb_ready = bool(config.get("listenbrainz_token"))
+        print(f"ListenBrainz: {'ready' if lb_ready else 'needs setup (open Setup in the app)'}", flush=True)
+
+    print(f"Settings file: {settings_module.settings_path()}", flush=True)
+    print(f"Log file:      {settings_module.log_path()}", flush=True)
+    return 0 if ok else 1
 
 
 # --------------------------------------------------------------------- gui
@@ -141,13 +191,17 @@ async def run_app(config: dict) -> int:
     app = EggCream(config)
     commands: asyncio.Queue = asyncio.Queue()
 
-    def show(kind: str, track: Recognition | None) -> None:
-        if kind == "now_playing" and track is not None:
-            print_track(track)
+    def show(kind: str, payload) -> None:
+        if kind == "now_playing" and payload is not None:
+            print_track(payload)
+        elif kind == "scrobbled" and payload is not None:
+            print(f"  scrobbled: {payload.label}", flush=True)
         elif kind == "started":
             print("  capturing system audio", flush=True)
         elif kind == "stopped":
             print("  stopped", flush=True)
+        elif kind == "error":
+            print(f"  error: {payload}", flush=True)
 
     app.on_event = show
 
@@ -227,6 +281,8 @@ def main() -> int:
         return asyncio.run(run_app(config))
     if command == "gui":
         return run_gui(config)
+    if command == "check":
+        return run_check(config)
     if command == "test":
         return asyncio.run(run_test(config))
     if command == "auth":

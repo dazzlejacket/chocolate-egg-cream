@@ -6,15 +6,19 @@
 // WASAPI / PulseAudio capture on the other platforms.
 //
 // Build:
-//   swiftc -O -o SystemAudioCapture SystemAudioCapture.swift
+//   swiftc -O -o tools/SystemAudioCapture tools/SystemAudioCapture.swift
 //
 // Requires macOS 13+ and Screen Recording permission for the terminal or
 // app that launches this helper.
 
 import AudioToolbox
 import CoreMedia
+import Darwin
 import Foundation
 import ScreenCaptureKit
+
+// Ignore SIGPIPE so closing stdout from Python exits cleanly instead of crashing.
+signal(SIGPIPE, SIG_IGN)
 
 func fail(_ message: String) -> Never {
     FileHandle.standardError.write(Data("error: \(message)\n".utf8))
@@ -23,8 +27,8 @@ func fail(_ message: String) -> Never {
 
 // ---------------------------------------------------------------- arguments
 
-var sampleRate = 48000.0
-var channelCount: UInt32 = 2
+var sampleRate: Int = 48000
+var channelCount: Int = 2
 
 let arguments = CommandLine.arguments
 var index = 1
@@ -32,14 +36,14 @@ while index < arguments.count {
     switch arguments[index] {
     case "--rate":
         index += 1
-        guard index < arguments.count, let value = Double(arguments[index]) else {
-            fail("--rate needs a number")
+        guard index < arguments.count, let value = Int(arguments[index]), value > 0 else {
+            fail("--rate needs a positive integer")
         }
         sampleRate = value
     case "--channels":
         index += 1
-        guard index < arguments.count, let value = UInt32(arguments[index]) else {
-            fail("--channels needs a number")
+        guard index < arguments.count, let value = Int(arguments[index]), value > 0 else {
+            fail("--channels needs a positive integer")
         }
         channelCount = value
     default:
@@ -51,79 +55,107 @@ while index < arguments.count {
 // ------------------------------------------------------------- PCM handling
 
 /// Copies the raw PCM out of a CMSampleBuffer and mixes it down to mono
-/// int16. ScreenCaptureKit usually delivers non-interleaved float32, but
-/// int16 shows up too, so both are handled.
+/// signed 16-bit little-endian PCM. Handles both non-interleaved and
+/// interleaved float32 / int16 formats.
 func monoPcm(from sampleBuffer: CMSampleBuffer) -> Data? {
-    guard let formatDescription = CMSampleBufferGetFormatDescriptions(sampleBuffer).first
-    else { return nil }
-    let description = formatDescription as! CMAudioFormatDescription
-    guard let basic = CMAudioFormatDescriptionGetStreamBasicDescription(description) else {
+    guard let formatDescription = CMSampleBufferGetFormatDescription(sampleBuffer) else {
+        return nil
+    }
+    guard let basic = CMAudioFormatDescriptionGetStreamBasicDescription(formatDescription) else {
         return nil
     }
     let stream = basic.pointee
     let frameCount = CMSampleBufferGetNumSamples(sampleBuffer)
+    guard frameCount > 0 else { return nil }
 
-    var audioBufferList = AudioBufferList()
+    let channels = Int(stream.mChannelsPerFrame)
+    guard channels > 0 else { return nil }
+
+    // First query the exact byte size needed for the AudioBufferList
+    // (non-interleaved stereo requires room for 2 AudioBuffers, not 1).
+    var bufferListSizeNeeded = 0
+    let sizeStatus = CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer(
+        sampleBuffer,
+        bufferListSizeNeededOut: &bufferListSizeNeeded,
+        bufferListOut: nil,
+        bufferListSize: 0,
+        blockBufferStructureAllocator: nil,
+        blockBufferMemoryAllocator: nil,
+        flags: 0,
+        blockBufferOut: nil
+    )
+    guard sizeStatus == noErr, bufferListSizeNeeded > 0 else { return nil }
+
+    let rawBufferList = UnsafeMutableRawPointer.allocate(
+        byteCount: bufferListSizeNeeded,
+        alignment: MemoryLayout<AudioBufferList>.alignment
+    )
+    defer { rawBufferList.deallocate() }
+    let audioBufferListPtr = rawBufferList.bindMemory(to: AudioBufferList.self, capacity: 1)
+
     var retainedBlockBuffer: CMBlockBuffer?
     let status = CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer(
         sampleBuffer,
-        Int(stream.mBytesPerFrame) * Int(frameCount),
-        &audioBufferList,
-        nil,
-        nil,
-        kCMSampleBufferFlag_AudioBufferList_Assure16ByteAlignment,
-        nil,
-        nil,
-        nil,
-        &retainedBlockBuffer
+        bufferListSizeNeededOut: nil,
+        bufferListOut: audioBufferListPtr,
+        bufferListSize: bufferListSizeNeeded,
+        blockBufferStructureAllocator: nil,
+        blockBufferMemoryAllocator: nil,
+        flags: kCMSampleBufferFlag_AudioBufferList_Assure16ByteAlignment,
+        blockBufferOut: &retainedBlockBuffer
     )
     guard status == noErr else { return nil }
-    defer {
-        if let retainedBlockBuffer = retainedBlockBuffer {
-            CFRelease(retainedBlockBuffer)
-        }
-    }
 
-    let buffers = UnsafeMutableAudioBufferListPointer(&audioBufferList)
+    let buffers = UnsafeMutableAudioBufferListPointer(audioBufferListPtr)
     guard !buffers.isEmpty else { return nil }
 
-    let bytesPerFrame = Int(stream.mBytesPerFrame)
-    let channels = Int(stream.mChannelsPerFrame)
-    guard channels > 0, bytesPerFrame > 0 else { return nil }
-
-    // One buffer per channel for non-interleaved data, one shared buffer
-    // for interleaved data.
-    let isInterleaved = buffers.count == 1 && channels > 1
-    let isFloat = stream.mFormatFlags & kAudioFormatFlagIsFloat != 0
+    let isFloat = (stream.mFormatFlags & kAudioFormatFlagIsFloat) != 0
+    let isNonInterleaved = (stream.mFormatFlags & kAudioFormatFlagIsNonInterleaved) != 0
+    let bytesPerSample = isFloat ? MemoryLayout<Float>.size : MemoryLayout<Int16>.size
 
     var out = Data(capacity: frameCount * 2)
 
-    if isInterleaved {
+    if !isNonInterleaved && buffers.count == 1 {
         guard let base = buffers[0].mData else { return nil }
-        let available = Int(buffers[0].mDataByteSize) / MemoryLayout<Int16>.size
-        let samples = base.assumingMemoryBound(to: Int16.self)
-        let usable = min(frameCount, available / channels)
-        for frame in 0..<usable {
-            var total: Float = 0
-            for channel in 0..<channels {
-                total += Float(samples[frame * channels + channel]) / Float(Int16.max)
+        let totalSamples = Int(buffers[0].mDataByteSize) / bytesPerSample
+        let usable = min(frameCount, totalSamples / channels)
+        if isFloat {
+            let samples = base.assumingMemoryBound(to: Float.self)
+            for frame in 0..<usable {
+                var total: Float = 0
+                for ch in 0..<channels {
+                    total += samples[frame * channels + ch]
+                }
+                let clamped = max(-1.0, min(1.0, total / Float(channels)))
+                let mixed = Int16(clamped * Float(Int16.max))
+                withUnsafeBytes(of: mixed.littleEndian) { out.append(contentsOf: $0) }
             }
-            let mixed = Int16(max(-1.0, min(1.0, total / Float(channels))) * Float(Int16.max))
-            withUnsafeBytes(of: mixed.littleEndian) { out.append(contentsOf: $0) }
+        } else {
+            let samples = base.assumingMemoryBound(to: Int16.self)
+            for frame in 0..<usable {
+                var total: Float = 0
+                for ch in 0..<channels {
+                    total += Float(samples[frame * channels + ch]) / Float(Int16.max)
+                }
+                let clamped = max(-1.0, min(1.0, total / Float(channels)))
+                let mixed = Int16(clamped * Float(Int16.max))
+                withUnsafeBytes(of: mixed.littleEndian) { out.append(contentsOf: $0) }
+            }
         }
         return out
     }
 
-    // Non-interleaved: average the channel buffers.
+    // Non-interleaved (standard ScreenCaptureKit format): one buffer per channel.
     var channelData: [(base: UnsafeRawPointer, frames: Int)] = []
     for buffer in buffers {
         guard let data = buffer.mData else { return nil }
-        let bytesPerSample = bytesPerFrame / channels
-        let frames = Int(buffer.mDataByteSize) / max(1, bytesPerSample)
+        let frames = Int(buffer.mDataByteSize) / bytesPerSample
         channelData.append((UnsafeRawPointer(data), frames))
     }
+    guard !channelData.isEmpty else { return nil }
 
     let usable = min(frameCount, channelData.map(\.frames).min() ?? 0)
+    let divisor = Float(channelData.count)
     for frame in 0..<usable {
         var total: Float = 0
         for channel in channelData {
@@ -133,7 +165,8 @@ func monoPcm(from sampleBuffer: CMSampleBuffer) -> Data? {
                 total += Float(channel.base.assumingMemoryBound(to: Int16.self)[frame]) / Float(Int16.max)
             }
         }
-        let mixed = Int16(max(-1.0, min(1.0, total / Float(channels))) * Float(Int16.max))
+        let clamped = max(-1.0, min(1.0, total / divisor))
+        let mixed = Int16(clamped * Float(Int16.max))
         withUnsafeBytes(of: mixed.littleEndian) { out.append(contentsOf: $0) }
     }
     return out
@@ -141,82 +174,108 @@ func monoPcm(from sampleBuffer: CMSampleBuffer) -> Data? {
 
 // ------------------------------------------------------------------ stream
 
-final class AudioOutput: NSObject, SCStreamOutput {
+@available(macOS 13.0, *)
+final class AudioOutput: NSObject, SCStreamOutput, SCStreamDelegate {
     let onSample: (CMSampleBuffer) -> Void
+    let onStop: (Error) -> Void
 
-    init(onSample: @escaping (CMSampleBuffer) -> Void) {
+    init(
+        onSample: @escaping (CMSampleBuffer) -> Void,
+        onStop: @escaping (Error) -> Void
+    ) {
         self.onSample = onSample
+        self.onStop = onStop
     }
 
     func stream(
         _ stream: SCStream,
         didOutputSampleBuffer sampleBuffer: CMSampleBuffer,
-        ofType type: SCStreamOutputType
+        of type: SCStreamOutputType
     ) {
         guard type == .audio, CMSampleBufferDataIsReady(sampleBuffer) else { return }
         onSample(sampleBuffer)
     }
-}
 
-let semaphore = DispatchSemaphore(value: 0)
-var capturedContent: SCShareableContent?
-
-SCShareableContent.currentShareableContent(completionHandler: { content, error in
-    if let error = error {
-        fail("ScreenCaptureKit is unavailable: \(error.localizedDescription)")
+    func stream(_ stream: SCStream, didStopWithError error: Error) {
+        onStop(error)
     }
-    capturedContent = content
-    semaphore.signal()
-})
-semaphore.wait()
-
-guard let content = capturedContent, let display = content.displays.first else {
-    fail("No display found to capture audio from")
 }
 
-let filter = SCContentFilter(display: display, excludingApplications: [])
-let configuration = SCStreamConfiguration()
-configuration.capturesAudio = true
-configuration.sampleRate = sampleRate
-configuration.channelCount = channelCount
-configuration.excludesCurrentProcessAudio = false
-configuration.shouldCaptureEntireScreen = false
+guard #available(macOS 13.0, *) else {
+    fail("System audio capture requires macOS 13 (Ventura) or newer.")
+}
 
-let output = AudioOutput { sampleBuffer in
-    guard let pcm = monoPcm(from: sampleBuffer) else { return }
-    pcm.withUnsafeBytes { raw in
-        guard let base = raw.baseAddress else { return }
-        var written = 0
-        let total = raw.count
-        while written < total {
-            let result = write(1, base.advanced(by: written), total - written)
-            if result <= 0 { return }
-            written += Int(result)
+// Retain stream and output for the lifetime of the process.
+var retainedStream: SCStream?
+var retainedOutput: AudioOutput?
+let audioQueue = DispatchQueue(label: "chocolate-egg-cream.audio")
+
+Task {
+    do {
+        let content = try await SCShareableContent.excludingDesktopWindows(
+            false,
+            onScreenWindowsOnly: false
+        )
+        guard let display = content.displays.first else {
+            fail("No display found to capture audio from.")
         }
+
+        let filter = SCContentFilter(
+            display: display,
+            excludingApplications: [],
+            exceptingWindows: []
+        )
+
+        let configuration = SCStreamConfiguration()
+        configuration.capturesAudio = true
+        configuration.sampleRate = sampleRate
+        configuration.channelCount = channelCount
+        configuration.excludesCurrentProcessAudio = false
+        // Minimize dummy video overhead since we only read the audio stream.
+        configuration.width = 2
+        configuration.height = 2
+        configuration.minimumFrameInterval = CMTime(value: 1, timescale: 1)
+
+        let output = AudioOutput(
+            onSample: { sampleBuffer in
+                guard let pcm = monoPcm(from: sampleBuffer), !pcm.isEmpty else { return }
+                pcm.withUnsafeBytes { raw in
+                    guard let base = raw.baseAddress else { return }
+                    var written = 0
+                    let total = raw.count
+                    while written < total {
+                        let result = write(STDOUT_FILENO, base.advanced(by: written), total - written)
+                        if result <= 0 {
+                            exit(0)
+                        }
+                        written += Int(result)
+                    }
+                }
+            },
+            onStop: { error in
+                fail("ScreenCaptureKit stream stopped: \(error.localizedDescription)")
+            }
+        )
+
+        let stream = SCStream(filter: filter, configuration: configuration, delegate: output)
+        try stream.addStreamOutput(output, type: .audio, sampleHandlerQueue: audioQueue)
+        try await stream.startCapture()
+
+        retainedOutput = output
+        retainedStream = stream
+    } catch {
+        let description = error.localizedDescription
+        let nsError = error as NSError
+        if nsError.code == -3801 || description.lowercased().contains("declined") {
+            fail(
+                "Screen Recording permission is required to capture Mac system audio. "
+                + "Open System Settings -> Privacy & Security -> Screen & System Audio Recording, "
+                + "enable your Terminal app, then restart."
+            )
+        }
+        fail("ScreenCaptureKit failed: \(description)")
     }
 }
 
-let stream = SCStream(filter: filter, configuration: configuration, delegate: nil)
-let queue = DispatchQueue(label: "chocolate-egg-cream.audio")
-
-do {
-    try stream.addStreamOutput(output, type: .audio, sampleHandlerQueue: queue)
-} catch {
-    fail("Could not attach the audio output: \(error.localizedDescription)")
-}
-
-let startSemaphore = DispatchSemaphore(value: 0)
-var startError: Error?
-stream.startCapture(completionHandler: { error in
-    startError = error
-    startSemaphore.signal()
-})
-startSemaphore.wait()
-
-if let startError = startError {
-    fail("Could not start the capture: \(startError.localizedDescription)")
-}
-
-// Stay alive until the process is stopped. The main run loop also drains
-// the main dispatch queue, which ScreenCaptureKit uses for its callbacks.
+// Stay alive until terminated by the parent process.
 RunLoop.main.run()

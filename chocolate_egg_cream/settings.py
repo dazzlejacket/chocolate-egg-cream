@@ -71,7 +71,7 @@ def save(data: dict[str, Any]) -> None:
     path = settings_path()
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
     except OSError as exc:
         log.warning("Could not write %s: %s", path, exc)
 

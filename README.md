@@ -11,7 +11,20 @@ AudioCapture  ->  ShazamRecognizer  ->  TrackState  ->  Scrobblers
  (per OS)          (ShazamIO)          (confirm twice)   (Last.fm, ListenBrainz)
 ```
 
-## Install
+## Quick start on Mac
+
+1. Double-click **`run_mac.command`** (or in Terminal: `chmod +x run_mac.command && ./run_mac.command`).
+   It automatically creates `.venv`, installs the Python packages, compiles the
+   macOS ScreenCaptureKit audio helper (`tools/SystemAudioCapture`), and opens the app.
+   *(If macOS says `swiftc` is missing, run `xcode-select --install` once and try again.)*
+2. The first time you press **Start**, macOS will ask for **Screen & System Audio Recording**
+   permission for Terminal. Allow it (in *System Settings -> Privacy & Security -> Screen & System Audio Recording*) and restart the app if macOS prompts you.
+3. Put on your radio stream in the browser or any player, press **Start**, and watch songs appear!
+4. Click **Copy**, **Translate (ES→EN)**, **Lyrics**, or **YouTube** on the current song or any song in **Recent Songs**.
+
+You can also run `python -m chocolate_egg_cream check` anytime to verify your setup.
+
+## Install (manual)
 
 ```bash
 python -m venv .venv
@@ -51,6 +64,7 @@ Other commands:
 | Command | What it does |
 | --- | --- |
 | `python -m chocolate_egg_cream console` | Run in the terminal instead of a window |
+| `python -m chocolate_egg_cream check` | Verify Python, macOS helper, and scrobbler setup |
 | `python -m chocolate_egg_cream test` | Take one sample and print what Shazam makes of it |
 | `python -m chocolate_egg_cream auth lastfm` | Run the Last.fm authorisation in the terminal |
 | `python -m chocolate_egg_cream set <key> <value>` | Change one setting |
@@ -84,10 +98,9 @@ The log is written next to it as `eggcream.log`.
 ### Last.fm
 
 1. Create an API account at https://www.last.fm/api/account/create and put
-   the key and secret into the settings.
-2. Run `python -m chocolate_egg_cream auth lastfm`, or press **Setup…** in
-   the window. The authorisation page opens in your browser; paste back the
-   token it shows you.
+   the key and secret into **Setup…** in the window (or via `set`).
+2. Press **1. Open Last.fm** in **Setup…** (or run `python -m chocolate_egg_cream auth lastfm`),
+   click **Yes, allow access** in your browser, then press **2. Finish auth** — no token copy-pasting needed.
 
 ### ListenBrainz
 
@@ -126,23 +139,18 @@ or paste it into **Setup…** in the window.
 
 ### macOS
 
-**This part is written but has never been run.** It was developed on Windows,
-where no Swift compiler exists, so the helper has not even been compiled yet.
-Expect to fix a compile error or two on the first try.
-
 ScreenCaptureKit only hands out sample buffers that native code can decode,
-so the capture lives in `tools/SystemAudioCapture.swift`. Build it once:
+so the capture lives in `tools/SystemAudioCapture.swift`. Run `./run_mac.command`
+(or build it once with):
 
 ```bash
 swiftc -O -o tools/SystemAudioCapture tools/SystemAudioCapture.swift
 ```
 
-The app builds it automatically the first time it runs if `swiftc` is
-available. macOS asks for Screen Recording permission the first time the
-capture starts, and ScreenCaptureKit needs macOS 13 or newer.
-
-If you do get it working, or hit a problem, an issue on the repository would
-be the place to say so.
+The app also builds (and rebuilds when updated) the helper automatically the
+first time it runs if `swiftc` is available. macOS asks for Screen Recording
+permission the first time the capture starts, and ScreenCaptureKit needs
+macOS 13 (Ventura) or newer.
 
 ### Linux
 

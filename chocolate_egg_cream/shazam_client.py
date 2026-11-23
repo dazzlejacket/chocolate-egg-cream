@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 
 log = logging.getLogger(__name__)
@@ -14,12 +15,17 @@ class ShazamClient:
     def __init__(self, timeout: float = 45.0) -> None:
         self.timeout = timeout
         self._shazam = None
+        self._accepts_options: bool | None = None
+        self._accepts_max_skew: bool | None = None
 
     async def _get(self):
         if self._shazam is None:
             from shazamio import Shazam
 
             self._shazam = Shazam()
+            params = inspect.signature(self._shazam.recognize).parameters
+            self._accepts_options = "options" in params
+            self._accepts_max_skew = "max_skew" in params
         return self._shazam
 
     async def recognize(
@@ -34,16 +40,21 @@ class ShazamClient:
         problems and timeouts are logged and treated the same way, so a bad
         sample can never take the app down.
         """
-        from shazamio_core import SearchParams
-
         shazam = await self._get()
-        options = None
-        if segment_seconds:
-            options = SearchParams(segment_duration_seconds=segment_seconds)
+        kwargs: dict = {}
+        if segment_seconds and self._accepts_options:
+            try:
+                from shazamio_core import SearchParams
+
+                kwargs["options"] = SearchParams(segment_duration_seconds=segment_seconds)
+            except ImportError:
+                pass
+        if max_skew is not None and self._accepts_max_skew:
+            kwargs["max_skew"] = max_skew
 
         try:
             return await asyncio.wait_for(
-                shazam.recognize(audio, options=options, max_skew=max_skew),
+                shazam.recognize(audio, **kwargs),
                 timeout=self.timeout,
             )
         except asyncio.TimeoutError:
@@ -55,8 +66,10 @@ class ShazamClient:
 
     async def close(self) -> None:
         if self._shazam is not None:
-            try:
-                await self._shazam.close()
-            except Exception:  # noqa: BLE001
-                pass
+            close_fn = getattr(self._shazam, "close", None)
+            if close_fn is not None:
+                try:
+                    await close_fn()
+                except Exception:  # noqa: BLE001
+                    pass
             self._shazam = None

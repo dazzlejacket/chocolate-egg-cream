@@ -1,8 +1,9 @@
 """Last.fm scrobbling.
 
 Uses the classic Last.fm API with an API key, an API secret and a session
-key. The session key comes from the authorisation flow in
-`chocolate_egg_cream.authorize`, which the app runs on first start.
+key. The desktop authorisation flow calls `auth.getToken`, opens the
+approval page in the browser with that token, and then exchanges it via
+`auth.getSession` once the user clicks Allow.
 """
 
 from __future__ import annotations
@@ -21,8 +22,16 @@ AUTH_ROOT = "https://www.last.fm/api/auth/"
 
 
 def sign(params: dict[str, str], secret: str) -> str:
-    """The Last.fm API signature: md5 over the sorted parameters."""
-    joined = "".join(f"{key}{params[key]}" for key in sorted(params))
+    """The Last.fm API signature: md5 over the sorted parameters.
+
+    Per Last.fm's API spec, `format` and `callback` must be excluded from
+    the signature.
+    """
+    joined = "".join(
+        f"{key}{params[key]}"
+        for key in sorted(params)
+        if key not in ("format", "callback")
+    )
     return hashlib.md5((joined + secret).encode("utf-8")).hexdigest()
 
 
@@ -47,19 +56,41 @@ class LastFM:
     def configured(self) -> bool:
         return bool(self.api_key and self.api_secret and self.session_key)
 
-    def auth_url(self) -> str:
+    def fetch_token(self) -> str:
+        """Request a temporary auth token for the desktop authorisation flow."""
+        params = {
+            "method": "auth.getToken",
+            "api_key": self.api_key,
+        }
+        params["api_sig"] = sign(params, self.api_secret)
+        params["format"] = "json"
+        response = requests.get(API_ROOT, params=params, timeout=self.timeout)
+        response.raise_for_status()
+        body = response.json()
+        if "error" in body:
+            raise RuntimeError(body.get("message", "Last.fm refused the token request"))
+        token = body.get("token")
+        if not token:
+            raise RuntimeError("Last.fm did not return an authorisation token")
+        return str(token)
+
+    def auth_url(self, token: str | None = None) -> str:
         """The URL the user opens to authorise the app."""
-        query = urllib.parse.urlencode({"api_key": self.api_key})
+        query_params = {"api_key": self.api_key}
+        if token:
+            query_params["token"] = token
+        query = urllib.parse.urlencode(query_params)
         return f"{AUTH_ROOT}?{query}"
 
     def exchange_token(self, token: str) -> str:
-        """Trade the token from the authorisation page for a session key."""
+        """Trade the approved token for a permanent session key."""
         params = {
             "method": "auth.getSession",
             "api_key": self.api_key,
             "token": token,
         }
         params["api_sig"] = sign(params, self.api_secret)
+        params["format"] = "json"
         response = requests.get(API_ROOT, params=params, timeout=self.timeout)
         response.raise_for_status()
         body = response.json()
@@ -67,8 +98,13 @@ class LastFM:
             raise RuntimeError(body.get("message", "Last.fm refused the token"))
         return body["session"]["key"]
 
-    def now_playing(self, artist: str, title: str, album: str | None = None,
-                    duration: float | None = None) -> bool:
+    def now_playing(
+        self,
+        artist: str,
+        title: str,
+        album: str | None = None,
+        duration: float | None = None,
+    ) -> bool:
         """Tell Last.fm what is playing right now."""
         params: dict[str, str] = {
             "method": "track.updateNowPlaying",
@@ -108,8 +144,10 @@ class LastFM:
 
     def _call(self, params: dict[str, str]) -> bool:
         params["api_sig"] = sign(params, self.api_secret)
+        params["format"] = "json"
         try:
-            response = requests.get(API_ROOT, params=params, timeout=self.timeout)
+            # Last.fm write methods (track.scrobble, track.updateNowPlaying) require POST.
+            response = requests.post(API_ROOT, data=params, timeout=self.timeout)
             response.raise_for_status()
         except requests.RequestException as exc:
             log.warning("Last.fm request failed: %s", exc)
