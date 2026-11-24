@@ -9,7 +9,7 @@ from .base import AudioCapture
 __all__ = ["AudioCapture", "get_capture"]
 
 
-def get_capture(sample_rate: int = 48000) -> AudioCapture:
+def get_capture(sample_rate: int = 48000, macos_backend: str = "auto") -> AudioCapture:
     """Return the capture implementation for the current platform."""
     if sys.platform == "win32":
         from .windows import WindowsCapture
@@ -18,7 +18,7 @@ def get_capture(sample_rate: int = 48000) -> AudioCapture:
     if sys.platform == "darwin":
         from .macos import MacCapture
 
-        return MacCapture(sample_rate=sample_rate)
+        return MacCapture(sample_rate=sample_rate, backend=macos_backend)
     if sys.platform.startswith("linux"):
         from .linux import LinuxCapture
 

@@ -8,6 +8,8 @@ what we open -- the microphone is never used.
 
 from __future__ import annotations
 
+import threading
+
 import numpy as np
 
 from .base import AudioCapture
@@ -21,10 +23,12 @@ class LinuxCapture(AudioCapture):
         self._device_id = device_id
         self._recorder = None
         self._channels = 2
+        self._stop_event = threading.Event()
 
     def open(self) -> None:
         import soundcard as sc
 
+        self._stop_event.clear()
         sources = sc.all_microphones(include_loopback=True)
         if self._device_id:
             matches = [s for s in sources if self._device_id in s.name]
@@ -39,6 +43,9 @@ class LinuxCapture(AudioCapture):
             samplerate=self.sample_rate, channels=self._channels
         )
         self._recorder.__enter__()
+
+    def request_stop(self) -> None:
+        self._stop_event.set()
 
     @staticmethod
     def _pick_monitor(sc, sources: list) -> object:
@@ -57,13 +64,25 @@ class LinuxCapture(AudioCapture):
         return monitors[0]
 
     def read(self, seconds: float) -> np.ndarray:
-        frames = int(self.sample_rate * seconds)
-        data = np.asarray(self._recorder.record(numframes=frames), dtype=np.float32)
-        if data.ndim > 1:
-            data = data.mean(axis=1)
-        return data
+        if self._recorder is None:
+            raise RuntimeError("Linux capture is not open")
+        total_frames = int(self.sample_rate * seconds)
+        chunk_frames = max(1, int(self.sample_rate * 0.5))
+        chunks: list[np.ndarray] = []
+        remaining = total_frames
+        while remaining > 0 and not self._stop_event.is_set():
+            take = min(chunk_frames, remaining)
+            data = np.asarray(self._recorder.record(numframes=take), dtype=np.float32)
+            if data.ndim > 1:
+                data = data.mean(axis=1)
+            chunks.append(data)
+            remaining -= take
+        if not chunks or self._stop_event.is_set():
+            return np.zeros(0, dtype=np.float32)
+        return chunks[0] if len(chunks) == 1 else np.concatenate(chunks)
 
     def close(self) -> None:
+        self._stop_event.set()
         if self._recorder is not None:
             self._recorder.__exit__(None, None, None)
             self._recorder = None

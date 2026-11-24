@@ -30,6 +30,9 @@ class AudioCapture(abc.ABC):
     def close(self) -> None:
         """Stop capturing and release the device."""
 
+    def request_stop(self) -> None:
+        """Signal any in-progress `read()` call to abort promptly."""
+
     def __enter__(self) -> AudioCapture:
         self.open()
         return self

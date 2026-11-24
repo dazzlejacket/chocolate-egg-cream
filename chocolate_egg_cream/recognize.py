@@ -1,10 +1,15 @@
-"""Turn a sample of system audio into an artist and a title."""
+"""Turn a sample of system audio into an artist and a title.
+
+Recognition providers implement the `Recognizer` protocol so the backend
+(ShazamIO by default) can be replaced cleanly if needed.
+"""
 
 from __future__ import annotations
 
 import io
 import wave
 from dataclasses import dataclass, field
+from typing import Protocol, runtime_checkable
 
 import numpy as np
 
@@ -13,7 +18,7 @@ from .shazam_client import ShazamClient
 
 @dataclass(frozen=True)
 class Recognition:
-    """One song that Shazam identified."""
+    """One song that a recognition provider identified."""
 
     artist: str
     title: str
@@ -35,8 +40,21 @@ class Recognition:
         return f"{self.artist.strip().lower()}::{self.title.strip().lower()}"
 
 
+@runtime_checkable
+class Recognizer(Protocol):
+    """Minimal interface for a pluggable audio recognition provider."""
+
+    name: str
+
+    async def recognize(self, samples: np.ndarray, sample_rate: int) -> Recognition | None:
+        """Return the song in `samples`, or None on no-match / transient error."""
+
+    async def close(self) -> None:
+        """Release any underlying network or native resources."""
+
+
 def to_wav_bytes(samples: np.ndarray, sample_rate: int) -> bytes:
-    """Wrap mono float32 samples in a WAV container."""
+    """Wrap mono float32 samples in a WAV container in memory (never written to disk)."""
     clipped = np.clip(samples, -1.0, 1.0)
     pcm = (clipped * 32767).astype("<i2")
 
@@ -76,10 +94,29 @@ def parse_response(response: dict) -> Recognition | None:
 class ShazamRecognizer:
     """Recognizes samples of system audio with ShazamIO."""
 
-    def __init__(self, segment_seconds: int = 10, max_skew: float | None = None) -> None:
+    name = "Shazam"
+
+    def __init__(
+        self,
+        segment_seconds: int = 10,
+        max_skew: float | None = None,
+        client: ShazamClient | None = None,
+    ) -> None:
         self.segment_seconds = segment_seconds
         self.max_skew = max_skew
-        self._client = ShazamClient()
+        self._client = client if client is not None else ShazamClient()
+
+    @property
+    def in_backoff(self) -> bool:
+        return self._client.in_backoff
+
+    @property
+    def backoff_remaining(self) -> float:
+        return self._client.backoff_remaining
+
+    @property
+    def last_error(self) -> str | None:
+        return self._client.last_error
 
     async def recognize(self, samples: np.ndarray, sample_rate: int) -> Recognition | None:
         """Return the song in `samples`, or None when Shazam does not know it."""
@@ -94,3 +131,20 @@ class ShazamRecognizer:
 
     async def close(self) -> None:
         await self._client.close()
+
+
+def create_recognizer(settings: dict) -> Recognizer:
+    """Create the configured recognition provider (ShazamIO by default)."""
+    provider = str(settings.get("recognition_provider", "shazam") or "shazam").strip().lower()
+    segment_seconds = int(settings.get("sample_seconds", 12))
+    max_skew_val = float(settings.get("max_skew", 0) or 0)
+    max_skew = max_skew_val if max_skew_val > 0 else None
+
+    if provider in ("shazam", "shazamio", ""):
+        return ShazamRecognizer(
+            segment_seconds=segment_seconds,
+            max_skew=max_skew,
+        )
+    raise ValueError(
+        f"Unsupported recognition provider {provider!r}. Supported: 'shazam'."
+    )

@@ -255,7 +255,103 @@ async def test_without_a_service() -> int:
     return 0
 
 
+async def test_listenbrainz_and_unicode_and_stop() -> int:
+    """Verify ListenBrainz scrobbling, Unicode titles, and clean Stop/Shutdown."""
+    print("\nlistenbrainz, unicode & stop cleanup")
+    lb_calls: list[dict] = []
+
+    class FakeLB(BaseHTTPRequestHandler):
+        def do_POST(self):
+            length = int(self.headers.get("Content-Length", "0"))
+            raw = self.rfile.read(length).decode("utf-8")
+            lb_calls.append(
+                {
+                    "path": self.path,
+                    "auth": self.headers.get("Authorization", ""),
+                    "body": json.loads(raw),
+                }
+            )
+            resp = json.dumps({"status": "ok"}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(resp)))
+            self.end_headers()
+            self.wfile.write(resp)
+
+        def log_message(self, *args):
+            pass
+
+    server = HTTPServer(("127.0.0.1", 0), FakeLB)
+    port = server.server_address[1]
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+
+    import chocolate_egg_cream.scrobble.listenbrainz as lb_module
+
+    orig_root = lb_module.API_ROOT
+    lb_module.API_ROOT = f"http://127.0.0.1:{port}/1/"
+
+    try:
+        u1 = song("Café Tacvba", "¿Cómo Te Extraño Mi Amor?", "UNI001")
+        u2 = song("坂本龍一", "Merry Christmas Mr. Lawrence", "UNI002")
+
+        settings = {
+            "lastfm_api_key": "",
+            "lastfm_api_secret": "",
+            "lastfm_session_key": "",
+            "listenbrainz_token": "lb-test-token",
+            "enabled_services": ["listenbrainz"],
+            "interval_seconds": 0,
+            "sample_seconds": 0.05,
+            "confirmations_required": 2,
+            "min_play_seconds": 1,
+            "scrobbled": [],
+        }
+
+        capture = FakeCapture()
+        recognizer = FakeRecognizer([u1, u1, None, None, u2, u2])
+        saved = []
+        app = EggCream(
+            settings,
+            capture=capture,
+            recognizer=recognizer,
+            save_settings=saved.append,
+        )
+
+        # Confirm u1, survive 2 outages (None, None) without losing u1, then confirm u2.
+        for i in range(6):
+            samples = await asyncio.to_thread(capture.read, 0.05)
+            rec = await recognizer.recognize(samples, capture.sample_rate)
+            finished = app.tracks.observe(rec, float(i) * 10.0, heard_audio=True)
+            if finished is not None:
+                await app._finish(finished)
+            if app.tracks.current is not None and app._now_playing_for != app.tracks.current.identity:
+                await app._announce_now_playing()
+
+        await app.shutdown()
+
+        now_playing = [c for c in lb_calls if c["path"].endswith("/playing-now")]
+        submits = [c for c in lb_calls if c["path"].endswith("/submit-listens")]
+        check("ListenBrainz auth header sent", all(c["auth"] == "Token lb-test-token" for c in lb_calls))
+        check("ListenBrainz received 2 now-playing calls", len(now_playing) == 2, f"got {len(now_playing)}")
+        check("ListenBrainz received 1 scrobble (u1)", len(submits) == 1, f"got {len(submits)}")
+        if submits:
+            meta = submits[0]["body"]["payload"][0]["track_metadata"]
+            check("Unicode artist preserved", meta["artist_name"] == "Café Tacvba")
+            check("Unicode title preserved", meta["track_name"] == "¿Cómo Te Extraño Mi Amor?")
+        check("capture.close called on shutdown", capture.closed >= 1)
+    finally:
+        lb_module.API_ROOT = orig_root
+        server.shutdown()
+
+    if FAILED:
+        print(f"{len(FAILED)} failed: {', '.join(FAILED)}")
+        return 1
+    print("all good")
+    return 0
+
+
 if __name__ == "__main__":
     code = asyncio.run(main())
     code |= asyncio.run(test_without_a_service())
+    code |= asyncio.run(test_listenbrainz_and_unicode_and_stop())
     raise SystemExit(code)

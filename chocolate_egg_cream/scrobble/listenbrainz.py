@@ -23,6 +23,8 @@ class ListenBrainz:
     def __init__(self, token: str, timeout: float = 15.0) -> None:
         self.token = token
         self.timeout = timeout
+        self._session = requests.Session()
+        self._session.headers.update({"User-Agent": "ChocolateEggCream/1.0"})
 
     @property
     def configured(self) -> bool:
@@ -80,17 +82,20 @@ class ListenBrainz:
 
     def _post(self, endpoint: str, payload: dict) -> bool:
         try:
-            response = requests.post(
+            response = self._session.post(
                 f"{API_ROOT}{endpoint}",
                 json=payload,
                 headers=self._headers(),
                 timeout=self.timeout,
             )
         except requests.RequestException as exc:
-            log.warning("ListenBrainz request failed: %s", exc)
+            log.warning("ListenBrainz request failed: %s", exc.__class__.__name__)
             return False
 
         if response.status_code >= 400:
             log.warning("ListenBrainz error %s: %s", response.status_code, response.text[:200])
             return False
         return True
+
+    def close(self) -> None:
+        self._session.close()

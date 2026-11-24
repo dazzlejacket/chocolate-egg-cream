@@ -51,6 +51,8 @@ class LastFM:
         self.api_secret = api_secret
         self.session_key = session_key
         self.timeout = timeout
+        self._session = requests.Session()
+        self._session.headers.update({"User-Agent": "ChocolateEggCream/1.0"})
 
     @property
     def configured(self) -> bool:
@@ -64,7 +66,7 @@ class LastFM:
         }
         params["api_sig"] = sign(params, self.api_secret)
         params["format"] = "json"
-        response = requests.get(API_ROOT, params=params, timeout=self.timeout)
+        response = self._session.get(API_ROOT, params=params, timeout=self.timeout)
         response.raise_for_status()
         body = response.json()
         if "error" in body:
@@ -91,7 +93,7 @@ class LastFM:
         }
         params["api_sig"] = sign(params, self.api_secret)
         params["format"] = "json"
-        response = requests.get(API_ROOT, params=params, timeout=self.timeout)
+        response = self._session.get(API_ROOT, params=params, timeout=self.timeout)
         response.raise_for_status()
         body = response.json()
         if "error" in body:
@@ -147,10 +149,10 @@ class LastFM:
         params["format"] = "json"
         try:
             # Last.fm write methods (track.scrobble, track.updateNowPlaying) require POST.
-            response = requests.post(API_ROOT, data=params, timeout=self.timeout)
+            response = self._session.post(API_ROOT, data=params, timeout=self.timeout)
             response.raise_for_status()
         except requests.RequestException as exc:
-            log.warning("Last.fm request failed: %s", exc)
+            log.warning("Last.fm request failed: %s", exc.__class__.__name__)
             return False
 
         try:
@@ -163,3 +165,6 @@ class LastFM:
             log.warning("Last.fm error %s: %s", body.get("error"), body.get("message"))
             return False
         return True
+
+    def close(self) -> None:
+        self._session.close()

@@ -65,7 +65,7 @@ if [ ! -x "$HELPER" ] || [ "$SOURCE" -nt "$HELPER" ]; then
 fi
 
 echo
-echo "Starting Chocolate Egg Cream..."
-echo "(First time on macOS: if asked, allow Screen & System Audio Recording for Terminal.)"
+echo "Starting Chocolate Egg Cream from source..."
+echo "(For standalone macOS use without Terminal permissions, install the .dmg release.)"
 echo
 exec .venv/bin/python -m chocolate_egg_cream

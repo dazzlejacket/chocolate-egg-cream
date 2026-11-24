@@ -44,12 +44,10 @@ def format_time(seconds: float) -> str:
 
 
 def build_song_urls(track: Recognition) -> dict[str, str]:
-    """Build helpful lookup URLs for a recognised song."""
-    title_q = urllib.parse.quote(track.title)
+    """Build helpful language-neutral lookup URLs for a recognised song."""
     full_q = urllib.parse.quote_plus(f"{track.artist} {track.title}")
-    lyrics_q = urllib.parse.quote_plus(f"{track.artist} {track.title} lyrics english translation")
+    lyrics_q = urllib.parse.quote_plus(f"{track.artist} {track.title} lyrics")
     return {
-        "translate": f"https://translate.google.com/?sl=es&tl=en&text={title_q}&op=translate",
         "lyrics": f"https://www.google.com/search?q={lyrics_q}",
         "youtube": f"https://www.youtube.com/results?search_query={full_q}",
     }
@@ -97,7 +95,7 @@ class SetupDialog(tk.Toplevel):
 
         self.lastfm_key = self._entry(frame, 1, "API key", self.settings.get("lastfm_api_key", ""))
         self.lastfm_secret = self._entry(
-            frame, 2, "API secret", self.settings.get("lastfm_api_secret", "")
+            frame, 2, "API secret", self.settings.get("lastfm_api_secret", ""), secret=True
         )
 
         auth_row = tk.Frame(frame, background=BACKGROUND)
@@ -133,8 +131,35 @@ class SetupDialog(tk.Toplevel):
         ).pack(side="right")
 
         self.lb_token = self._entry(
-            frame, 5, "User token", self.settings.get("listenbrainz_token", "")
+            frame, 5, "User token", self.settings.get("listenbrainz_token", ""), secret=True
         )
+
+        self._show_secrets = tk.BooleanVar(value=False)
+        tk.Checkbutton(
+            frame,
+            text="Show secrets",
+            variable=self._show_secrets,
+            command=self._toggle_secrets,
+            background=BACKGROUND,
+            activebackground=BACKGROUND,
+            foreground=MUTED,
+            font=(FONT, 8),
+        ).grid(row=6, column=1, sticky="w", padx=(10, 0), pady=(2, 0))
+
+        tk.Label(
+            frame,
+            text=(
+                "Privacy: short in-memory system audio samples are sent to Shazam "
+                "for recognition and are never saved to disk. No microphone or screen "
+                "capture is used."
+            ),
+            background=BACKGROUND,
+            foreground=MUTED,
+            font=(FONT, 8),
+            wraplength=360,
+            justify="left",
+            anchor="w",
+        ).grid(row=7, column=0, columnspan=2, sticky="ew", pady=(8, 4))
 
         tk.Label(
             frame,
@@ -145,15 +170,15 @@ class SetupDialog(tk.Toplevel):
             wraplength=360,
             justify="left",
             anchor="w",
-        ).grid(row=6, column=0, columnspan=2, sticky="ew", pady=(10, 8))
+        ).grid(row=8, column=0, columnspan=2, sticky="ew", pady=(4, 8))
 
         buttons = tk.Frame(frame, background=BACKGROUND)
-        buttons.grid(row=7, column=0, columnspan=2, sticky="ew")
+        buttons.grid(row=9, column=0, columnspan=2, sticky="ew")
 
         ttk.Button(buttons, text="Save", command=self._save).pack(side="left", padx=(0, 6))
         ttk.Button(buttons, text="Close", command=self.destroy).pack(side="left")
 
-    def _entry(self, parent, row: int, label: str, value: str) -> tk.Entry:
+    def _entry(self, parent, row: int, label: str, value: str, *, secret: bool = False) -> tk.Entry:
         tk.Label(
             parent,
             text=label,
@@ -162,10 +187,15 @@ class SetupDialog(tk.Toplevel):
             font=(FONT, 9),
             anchor="w",
         ).grid(row=row, column=0, sticky="w", pady=3)
-        entry = tk.Entry(parent, font=(FONT, 9), width=34)
+        entry = tk.Entry(parent, font=(FONT, 9), width=34, show="•" if secret else "")
         entry.insert(0, value)
         entry.grid(row=row, column=1, sticky="ew", padx=(10, 0), pady=3)
         return entry
+
+    def _toggle_secrets(self) -> None:
+        mask = "" if self._show_secrets.get() else "•"
+        self.lastfm_secret.configure(show=mask)
+        self.lb_token.configure(show=mask)
 
     def _collect_enabled(self) -> list[str]:
         enabled = []
@@ -271,7 +301,7 @@ class SetupDialog(tk.Toplevel):
 
 
 class EggCreamWindow:
-    """The whole GUI. Compact, Mac-friendly, and handy for Spanish radio."""
+    """The whole GUI: compact, lightweight, and distraction-free."""
 
     def __init__(self, settings: dict) -> None:
         self.settings = settings
@@ -286,6 +316,7 @@ class EggCreamWindow:
         self._history: list[Recognition] = []
         self._selected_track: Recognition | None = None
         self._scrobble_count = 0
+        self._poll_id: str | None = None
 
         self.root = tk.Tk()
         self.root.title("Chocolate Egg Cream")
@@ -299,7 +330,7 @@ class EggCreamWindow:
         self.services_var = tk.StringVar(value=self._services_text())
 
         self._build()
-        self.root.after(150, self._poll)
+        self._poll_id = self.root.after(150, self._poll)
 
     # ------------------------------------------------------------- layout
 
@@ -361,7 +392,7 @@ class EggCreamWindow:
 
         ttk.Button(buttons, text="Setup…", command=self.open_setup).pack(side="right")
 
-        # Quick lookup actions for the current or selected song (handy for Spanish tracks)
+        # Quick lookup actions for the current or selected song
         actions = tk.Frame(outer, background=BACKGROUND)
         actions.grid(row=4, column=0, sticky="ew", pady=(2, 8))
 
@@ -369,14 +400,6 @@ class EggCreamWindow:
             actions, text="Copy", command=self._copy_track, state="disabled"
         )
         self.copy_button.pack(side="left", padx=(0, 5))
-
-        self.translate_button = ttk.Button(
-            actions,
-            text="Translate (ES→EN)",
-            command=lambda: self._open_track_url("translate"),
-            state="disabled",
-        )
-        self.translate_button.pack(side="left", padx=(0, 5))
 
         self.lyrics_button = ttk.Button(
             actions,
@@ -397,7 +420,7 @@ class EggCreamWindow:
         # Recent songs list
         tk.Label(
             outer,
-            text="RECENT SONGS (click any to copy / translate)",
+            text="RECENT SONGS (click any to select)",
             background=BACKGROUND,
             foreground=MUTED,
             font=(FONT, 8, "bold"),
@@ -492,7 +515,6 @@ class EggCreamWindow:
         state = "normal" if enabled else "disabled"
         for btn in (
             self.copy_button,
-            self.translate_button,
             self.lyrics_button,
             self.youtube_button,
         ):
@@ -611,7 +633,17 @@ class EggCreamWindow:
         if self._closing:
             return
         self._closing = True
-        self.root.destroy()
+        if self._poll_id is not None:
+            try:
+                self.root.after_cancel(self._poll_id)
+            except Exception:  # noqa: BLE001
+                pass
+            self._poll_id = None
+        try:
+            self.root.quit()
+            self.root.destroy()
+        except Exception:  # noqa: BLE001
+            pass
         self._shutdown_engine()
 
     def _shutdown_engine(self) -> None:
@@ -644,7 +676,7 @@ class EggCreamWindow:
 
         self._refresh_status()
         if not self._closing:
-            self.root.after(150, self._poll)
+            self._poll_id = self.root.after(150, self._poll)
 
     def _handle(self, kind: str, payload) -> None:
         if kind == "now_playing" and payload is not None:
@@ -693,8 +725,13 @@ class EggCreamWindow:
 
         track = engine.current
         candidate = engine.candidate
+        backoff = engine.recognizer_backoff
         if track is None:
-            if candidate is not None:
+            if backoff > 0:
+                self.status_var.set(
+                    f"recognition unavailable · retrying in {int(backoff) + 1}s"
+                )
+            elif candidate is not None:
                 self.status_var.set(f"hearing: {candidate.label} (confirming…)")
             elif engine.heard_audio is False:
                 self.status_var.set("listening · quiet (play your radio!)")
@@ -703,7 +740,9 @@ class EggCreamWindow:
             return
 
         base = f"listening · {format_time(engine.playtime)}"
-        if candidate is not None and candidate.identity != track.identity:
+        if backoff > 0:
+            self.status_var.set(f"{base} · recognition retrying in {int(backoff) + 1}s")
+        elif candidate is not None and candidate.identity != track.identity:
             self.status_var.set(f"{base} · next: {candidate.label} (confirming…)")
         elif engine.heard_audio is False:
             self.status_var.set(f"{base} · quiet")

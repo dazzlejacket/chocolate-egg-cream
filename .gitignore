@@ -1,4 +1,14 @@
 .venv/
 __pycache__/
 *.pyc
+*.pyo
+build/
+dist/
+*.egg-info/
+*.dmg
+*.AppImage
 tools/SystemAudioCapture
+settings.json
+eggcream.log
+.DS_Store
+Thumbs.db

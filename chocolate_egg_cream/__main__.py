@@ -19,7 +19,7 @@ import webbrowser
 
 import numpy as np
 
-from . import settings as settings_module
+from . import __version__, credentials, settings as settings_module
 from .app import EggCream, is_silent
 from .recognize import Recognition
 
@@ -40,11 +40,13 @@ def print_track(track: Recognition, playtime: float | None = None) -> None:
 async def run_test(config: dict) -> int:
     """Capture one sample and print what Shazam makes of it."""
     from .capture import get_capture
-    from .recognize import ShazamRecognizer
+    from .recognize import create_recognizer
 
     sample_seconds = float(config["sample_seconds"])
-    capture = get_capture()
-    recognizer = ShazamRecognizer(segment_seconds=int(sample_seconds))
+    capture = get_capture(
+        macos_backend=str(config.get("macos_capture_backend", "auto") or "auto")
+    )
+    recognizer = create_recognizer(config)
 
     print(f"Capturing {sample_seconds:.0f}s of system audio ...", flush=True)
     started = time.time()
@@ -144,8 +146,9 @@ def run_check(config: dict) -> int:
             binary = helper_path()
             print(f"macOS audio helper: ready ({binary})", flush=True)
             print(
-                "  Note: Make sure Screen Recording permission is enabled for your "
-                "Terminal in System Settings -> Privacy & Security -> Screen & System Audio Recording.",
+                "  Note: On macOS 14.2+, Chocolate Egg Cream uses Core Audio Taps "
+                "(audio-only permission under System Settings -> Privacy & Security -> "
+                "Screen & System Audio Recording -> System Audio Recording Only).",
                 flush=True,
             )
         except Exception as exc:  # noqa: BLE001
@@ -262,17 +265,23 @@ async def run_app(config: dict) -> int:
 
 def main() -> int:
     # Windows consoles default to a legacy code page; the em dash in the
-    # output would come out as mojibake.
+    # output would come out as mojibake. In windowed builds stdout/stderr may be None.
     for stream in (sys.stdout, sys.stderr):
+        if stream is None:
+            continue
         try:
             stream.reconfigure(encoding="utf-8", errors="replace")
         except (AttributeError, ValueError):
             pass
 
+    args = sys.argv[1:]
+    if args and args[0] in ("--version", "-V", "version"):
+        print(f"Chocolate Egg Cream {__version__}", flush=True)
+        return 0
+
     config = settings_module.load()
     settings_module.setup_logging(config.get("log_level", "INFO"))
 
-    args = sys.argv[1:]
     if not args:
         return run_gui(config)
 
@@ -309,7 +318,8 @@ def main() -> int:
         else:
             config[key] = value
         settings_module.save(config)
-        print(f"{key} = {config[key]}", flush=True)
+        display_val = "(saved securely)" if key in credentials.SECRET_KEYS else config[key]
+        print(f"{key} = {display_val}", flush=True)
         return 0
     if command == "settings":
         print(settings_module.settings_path(), flush=True)

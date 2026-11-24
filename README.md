@@ -1,221 +1,155 @@
 # Chocolate Egg Cream
 
-A very small desktop app that listens to what your computer is playing, works
-out the song with Shazam, and scrobbles it to Last.fm and/or ListenBrainz.
+A small, fast, standalone desktop app that listens to what your computer is
+playing, identifies the song with Shazam, and scrobbles it to Last.fm and/or
+ListenBrainz.
 
-It never uses the microphone. It captures the audio your system is playing
-and nothing else.
+It never captures your screen, video, or microphone. It captures the audio your
+system is playing and nothing else.
 
 ```
-AudioCapture  ->  ShazamRecognizer  ->  TrackState  ->  Scrobblers
- (per OS)          (ShazamIO)          (confirm twice)   (Last.fm, ListenBrainz)
+AudioCapture  ->  Recognizer (ShazamIO)  ->  TrackState  ->  Scrobblers
+ (per OS)          (retries + backoff)       (confirm 2x)    (Last.fm, ListenBrainz)
 ```
 
-## Quick start on Mac
+## Download & Install
 
-1. Double-click **`run_mac.command`** (or in Terminal: `chmod +x run_mac.command && ./run_mac.command`).
-   It automatically creates `.venv`, installs the Python packages, compiles the
-   macOS ScreenCaptureKit audio helper (`tools/SystemAudioCapture`), and opens the app.
-   *(If macOS says `swiftc` is missing, run `xcode-select --install` once and try again.)*
-2. The first time you press **Start**, macOS will ask for **Screen & System Audio Recording**
-   permission for Terminal. Allow it (in *System Settings -> Privacy & Security -> Screen & System Audio Recording*) and restart the app if macOS prompts you.
-3. Put on your radio stream in the browser or any player, press **Start**, and watch songs appear!
-4. Click **Copy**, **Translate (ES→EN)**, **Lyrics**, or **YouTube** on the current song or any song in **Recent Songs**.
+Download the release for your platform from **GitHub Releases** and verify the
+SHA-256 checksum in `SHA256SUMS.txt` if desired. No Python, Homebrew, Terminal,
+or Xcode installation is required.
 
-You can also run `python -m chocolate_egg_cream check` anytime to verify your setup.
+### macOS (Apple Silicon & Intel)
 
-## Install (manual)
+1. Download **`ChocolateEggCream-<version>-macos-arm64.dmg`** (Apple Silicon) or
+   **`ChocolateEggCream-<version>-macos-x86_64.dmg`** (Intel).
+2. Open the `.dmg` and drag **Chocolate Egg Cream** into **Applications**.
+3. Double-click **Chocolate Egg Cream** in **Applications**.
+   - *If the release is ad-hoc signed (not notarized):* macOS Gatekeeper may ask
+     you to confirm on first launch via **System Settings → Privacy & Security →
+     Open Anyway**.
+4. Click **Start**. On macOS 14.2+, Chocolate Egg Cream uses **Core Audio Taps**
+   and asks macOS for **System Audio Recording Only** permission for **Chocolate
+   Egg Cream** itself (never Terminal, never screen video, never microphone).
+   On macOS 13.0–14.1, it automatically falls back to ScreenCaptureKit audio.
+
+### Windows (x64)
+
+1. Download **`ChocolateEggCream-<version>-windows-x64.exe`**.
+2. Double-click to launch (no installer, no console window, no Python required).
+3. Play music or internet radio and click **Start**.
+
+### Linux (x86_64)
+
+1. Download **`ChocolateEggCream-<version>-linux-x86_64.AppImage`** (or the
+   portable `.tar.gz` archive if FUSE is not installed).
+2. Make it executable and run it:
+   ```bash
+   chmod +x ChocolateEggCream-<version>-linux-x86_64.AppImage
+   ./ChocolateEggCream-<version>-linux-x86_64.AppImage
+   ```
+3. Captures your default PipeWire or PulseAudio sink monitor (`*.monitor`) with
+   no root privileges and no microphone permission.
+
+## Using the App
+
+The window stays deliberately small:
+
+- **Start / Stop** — start or stop system audio capture (Stop and Quit release
+  the audio device and stop all background work immediately).
+- **Copy**, **Lyrics**, **YouTube** — quick actions for the current song or any
+  song selected in **Recent Songs** (language-neutral search, full Unicode
+  support).
+- **Setup…** — configure Last.fm and/or ListenBrainz without editing JSON.
+
+### Scrobbling Setup
+
+- **Last.fm**: Create an API account at https://www.last.fm/api/account/create,
+  enter your API key and secret in **Setup…**, click **1. Open Last.fm**, click
+  **Yes, allow access** in your browser, then click **2. Finish auth**.
+- **ListenBrainz**: Create a user token at https://listenbrainz.org/settings/
+  and paste it into **Setup…**.
+
+## Privacy & Security
+
+- **System audio only**: never accesses the microphone, camera, or screen video.
+- **No permanent recordings**: short 12-second audio samples are held in memory
+  only, sent to Shazam for recognition, and immediately discarded.
+- **OS credential storage**: Last.fm API secret, Last.fm session key, and
+  ListenBrainz user token are stored in Windows Credential Manager, macOS
+  Keychain, or Linux Secret Service (`secret-tool`) when available, rather than
+  plaintext `settings.json`.
+- **No telemetry**, **no analytics**, **no runtime downloads**, and **no
+  credentials in logs**.
+
+## How Recognition & Scrobbling Work
+
+- **Confirm twice**: the same song must be identified twice before becoming the
+  current track.
+- **Outage resilience**: timeouts, HTTP 429 rate limits, and Shazam outages use
+  bounded retries and exponential backoff with automatic recovery. Network
+  failures never end the current track or trigger false song changes.
+- **Duplicate protection**: each track identity (ISRC or normalized
+  artist/title) is remembered so stale or repeated matches are never scrobbled
+  twice.
+- **Playtime rule**: playtime only advances while audio is actually heard. A
+  track scrobbles when it plays at least half its duration (capped at 4
+  minutes), or `min_play_seconds` (default 120s) when duration is unknown.
+- **Pluggable provider**: ShazamIO is the default; see
+  [docs/RECOGNITION_PROVIDERS.md](docs/RECOGNITION_PROVIDERS.md) for our
+  evaluation of ShazamKit, AudD, ACRCloud, and AcoustID.
+
+## Settings & Logs
+
+Non-secret settings live in:
+- Windows: `%APPDATA%\chocolate-egg-cream\settings.json`
+- macOS / Linux: `~/.config/chocolate-egg-cream/settings.json`
+
+A rotating log (`eggcream.log`, capped at 1 MB × 3 files) sits next to it.
+
+| Key | Meaning | Default |
+| --- | --- | --- |
+| `enabled_services` | `["lastfm", "listenbrainz"]` | both |
+| `interval_seconds` | Seconds between samples | `25` |
+| `sample_seconds` | Length of each sample in seconds | `12` |
+| `confirmations_required` | Matches needed to confirm a track | `2` |
+| `min_play_seconds` | Minimum playtime when duration is unknown | `120` |
+| `max_skew` | Max Shazam time/frequency skew (`0` disables) | `0` |
+| `macos_capture_backend` | `auto` (Core Audio Taps on 14.2+), `coreaudio`, or `screencapturekit` | `auto` |
+
+## Running & Building from Source
+
+Python 3.10+ is required for source installs.
 
 ```bash
 python -m venv .venv
-.venv/bin/pip install -r requirements.txt          # Windows: .venv\Scripts\pip
-```
-
-Python 3.10 or newer.
-
-## Run
-
-```bash
+.venv/bin/pip install -r requirements-release.txt   # Windows: .venv\Scripts\pip
 python -m chocolate_egg_cream
 ```
 
-That opens a small window:
+CLI commands:
+- `python -m chocolate_egg_cream` — open GUI
+- `python -m chocolate_egg_cream console` — terminal mode
+- `python -m chocolate_egg_cream check` — verify capture & scrobbler readiness
+- `python -m chocolate_egg_cream test` — capture one sample and identify it
+- `python -m chocolate_egg_cream auth lastfm` — terminal Last.fm auth
+- `python -m chocolate_egg_cream set <key> <value>` — update a setting
+- `python -m chocolate_egg_cream settings` — print settings file path
+- `python -m chocolate_egg_cream --version` — print version
 
-```
-  CHOCOLATE EGG CREAM
-  Gold Lounge — Birds
-  listening · 1:23
+### Reproducible Release Builds
 
-  [ Start ]  [ Stop ]
+Install build dependencies (`pip install -r requirements-release.txt -r requirements-build.txt`) and run the native script for your OS:
 
-  Last.fm ready · ListenBrainz needs setup
-  [ Setup… ]
-```
+- Windows x64: `pwsh -File scripts/build_windows.ps1`
+- macOS (Apple Silicon / Intel): `bash scripts/build_macos.sh`
+- Linux x86_64: `bash scripts/build_linux.sh`
 
-Press **Start** to begin capturing and recognising, **Stop** to pause. The
-**Setup…** button opens a small window where the Last.fm and ListenBrainz
-details can be filled in without touching the settings file by hand.
-
-The window is deliberately small: the current song, how long it has been
-playing, and the two buttons. Nothing else.
-
-Other commands:
-
-| Command | What it does |
-| --- | --- |
-| `python -m chocolate_egg_cream console` | Run in the terminal instead of a window |
-| `python -m chocolate_egg_cream check` | Verify Python, macOS helper, and scrobbler setup |
-| `python -m chocolate_egg_cream test` | Take one sample and print what Shazam makes of it |
-| `python -m chocolate_egg_cream auth lastfm` | Run the Last.fm authorisation in the terminal |
-| `python -m chocolate_egg_cream set <key> <value>` | Change one setting |
-| `python -m chocolate_egg_cream settings` | Print the path of the settings file |
-
-The window needs `tkinter`, which comes with Python on Windows and macOS.
-On Linux it may need `python3-tk`. If it is missing, the app says so and
-falls back to the terminal.
-
-## Settings
-
-Settings live in a small JSON file:
-
-* Windows: `%APPDATA%\chocolate-egg-cream\settings.json`
-* macOS and Linux: `~/.config/chocolate-egg-cream/settings.json`
-
-The log is written next to it as `eggcream.log`.
-
-| Key | Meaning |
-| --- | --- |
-| `lastfm_api_key`, `lastfm_api_secret` | From https://www.last.fm/api/account/create |
-| `lastfm_session_key` | Filled in by `auth lastfm` |
-| `listenbrainz_token` | User token from https://listenbrainz.org/settings/ |
-| `enabled_services` | Any of `lastfm` and `listenbrainz` |
-| `interval_seconds` | How often to take a sample (default 25) |
-| `sample_seconds` | How long each sample is (default 12) |
-| `confirmations_required` | Matching results needed to confirm a track (default 2) |
-| `min_play_seconds` | How long a track without a known duration must play (default 120) |
-| `max_skew` | Reject a match that is badly aligned in time or frequency. 0 turns the check off (default 0) |
-
-### Last.fm
-
-1. Create an API account at https://www.last.fm/api/account/create and put
-   the key and secret into **Setup…** in the window (or via `set`).
-2. Press **1. Open Last.fm** in **Setup…** (or run `python -m chocolate_egg_cream auth lastfm`),
-   click **Yes, allow access** in your browser, then press **2. Finish auth** — no token copy-pasting needed.
-
-### ListenBrainz
-
-Create a user token at https://listenbrainz.org/settings/ and put it into the
-settings:
-
-```bash
-python -m chocolate_egg_cream set listenbrainz_token <your-token>
-```
-
-or paste it into **Setup…** in the window.
-
-## How it decides what is playing
-
-* A recognition on its own is never enough. The same song has to come back
-  twice before it becomes the current track.
-* A failed recognition never ends the current track. Recognition failures are
-  normal, so the app keeps the track it has and tries again next time.
-* Playtime only grows while audio was actually heard, so a stopped player
-  does not make a track look long enough to scrobble.
-* When a new track is confirmed, the previous one is scrobbled only if it
-  played long enough: half its length (capped at four minutes) when the
-  length is known, `min_play_seconds` when it is not. Shazam does not report
-  track lengths, so in practice the fallback is used.
-* A song is only ever scrobbled once. The list of scrobbled songs is kept in
-  the settings file, so repeated Shazam matches never turn into repeated
-  scrobbles.
-
-## Platform support
-
-| Platform | Capture method | Status |
-| --- | --- | --- |
-| Windows | WASAPI loopback (`IAudioClient` with the loopback flag), via `soundcard` | **Tested** |
-| macOS | ScreenCaptureKit, via a small Swift helper in `tools/` | **Written, never compiled** |
-| Linux | PipeWire/PulseAudio monitor source, via `soundcard` | **Written, not tested** |
-
-### macOS
-
-ScreenCaptureKit only hands out sample buffers that native code can decode,
-so the capture lives in `tools/SystemAudioCapture.swift`. Run `./run_mac.command`
-(or build it once with):
-
-```bash
-swiftc -O -o tools/SystemAudioCapture tools/SystemAudioCapture.swift
-```
-
-The app also builds (and rebuilds when updated) the helper automatically the
-first time it runs if `swiftc` is available. macOS asks for Screen Recording
-permission the first time the capture starts, and ScreenCaptureKit needs
-macOS 13 (Ventura) or newer.
-
-### Linux
-
-**This part is written but has never been run.** It was developed on Windows,
-so it has not been tested against a real PipeWire or PulseAudio server.
-
-PipeWire and PulseAudio both expose a monitor source for the default output
-sink, and `soundcard` opens that source. If the monitor source is missing,
-the app says so and stops rather than falling back to the microphone.
-
-## What was tested on Windows
-
-Everything below was run on a Windows 11 machine with a Soundwire speaker
-device, against live internet radio and local audio files.
-
-* **System audio capture works.** WASAPI loopback returned the audio the
-  system was playing, never the microphone. A 440 Hz test tone played through
-  the speakers came back with an RMS of 0.42.
-* **Recognition works.** Live radio and local files were identified by
-  ShazamIO, typically in 0.2 to 0.8 seconds.
-* **The full loop works.** Running the app against live radio printed
-  `now playing: Klangstein — Querbeat` after the song had been recognised
-  twice. The window shows the same thing, and was checked on screen with a
-  live recognition showing *State Azure — Rise*.
-* **A song change is detected.** Playing Vivaldi and then Beethoven, the app
-  confirmed the first track, noticed the second one, and reported both:
-
-  ```
-  now playing: Vladimir Spivakov & Moscow Virtuosi — 12 Violin Concertos,
-                Op. 8 "Il cimento dell'armonia e dell' invenzione" -
-                Concerto No. 1 in E for Solo Violin "La Primavera": I. Allegro
-  now playing: Rousseau — Moonlight Sonata, Mvt. 1
-  ```
-
-* **The scrobble rule holds.** A track that only played for 15 seconds was
-  not scrobbled (`Not scrobbling Rousseau — Moonlight Sonata, Mvt. 1 (played
-  15s)`), while one that played long enough was passed to the scrobblers.
-
-Songs identified during testing: *Desert Phase* (Kaya Project), *Gold
-Lounge – Birds*, *Klangstein – Querbeat*, *The Four Seasons, Concerto No. 1
-"La Primavera": I. Allegro* (Vivaldi), *Moonlight Sonata, Mvt. 1* (Rousseau).
-
-### Limits worth knowing about
-
-* **Shazam's endpoint stalls.** Responses ranged from 0.2 seconds to over
-  100 seconds, and after a burst of requests the endpoint stopped answering
-  for a while. Requests therefore have a 45 second timeout, and a timeout
-  counts as "did not recognise it" rather than as an error.
-* **Shazam does not know every song.** Radio stations play plenty of tracks
-  that are not in its catalogue; those simply come back as "no match".
-* **Quiet recordings can match the wrong song.** A very quiet recording of
-  Beethoven's Moonlight Sonata was consistently reported as Debussy's
-  *Clair de Lune* (under its Italian title *Nuvole Bianche*), while later
-  parts of the same file matched correctly. Confirming a result twice does
-  not catch this, because the wrong answer is stable too. The `max_skew`
-  setting can reject badly aligned matches, but it was not reliable to
-  measure while the endpoint was stalling.
-* **Track lengths are unknown.** Shazam does not return a duration, so the
-  scrobble rule falls back to `min_play_seconds`.
+See [docs/RELEASE_VERIFICATION.md](docs/RELEASE_VERIFICATION.md) for signing,
+notarization, and native hardware verification checklists.
 
 ## Tests
 
 ```bash
-python tests/test_core.py            # the state machine, no network or audio needed
-python tests/test_scrobble_flow.py   # the real loop against a fake Last.fm API
-python tests/recognise_source.py <url-or-file>   # play something and see what it says
+python tests/test_core.py
+python tests/test_scrobble_flow.py
 ```
-

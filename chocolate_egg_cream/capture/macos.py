@@ -1,20 +1,22 @@
-"""macOS system audio: ScreenCaptureKit.
+"""macOS system audio capture via Core Audio Taps (macOS 14.2+) or ScreenCaptureKit fallback.
 
-ScreenCaptureKit hands out compressed sample buffers that only native code
-can decode, so the capture lives in a small Swift helper
-(`tools/SystemAudioCapture.swift`) that writes mono 16-bit PCM to stdout.
-This module pumps that stream on a background thread so the pipe never backs
-up and `read()` always returns fresh, live audio.
+System audio is captured by a small native Swift helper (`SystemAudioCapture`)
+that writes mono 16-bit little-endian PCM to stdout. It never captures screen
+video and never touches the microphone.
 
-Build the helper once with:
+On macOS 14.2+, Core Audio Taps (`AudioHardwareCreateProcessTap`) are used by
+default, requiring only the audio-only `NSAudioCaptureUsageDescription`
+("System Audio Recording Only") permission for the Chocolate Egg Cream app
+bundle itself — never Terminal.
+
+On macOS 13.0–14.1 (or when explicitly selected with `backend="screencapturekit"`),
+ScreenCaptureKit is used as a compatibility fallback.
+
+In packaged `.app` builds, the compiled `SystemAudioCapture` binary is bundled
+inside `Contents/MacOS/` and is never compiled at runtime. When running from
+source, it can be built with:
 
     swiftc -O -o tools/SystemAudioCapture tools/SystemAudioCapture.swift
-
-If the binary is missing (or older than the Swift source) and a Swift compiler
-is present, it is built automatically on first use.
-
-Note: macOS asks for Screen Recording permission the first time the
-capture starts.
 """
 
 from __future__ import annotations
@@ -23,6 +25,7 @@ import logging
 import os
 import shutil
 import subprocess
+import sys
 import threading
 import time
 from collections import deque
@@ -36,10 +39,26 @@ log = logging.getLogger(__name__)
 
 _HELPER_NAME = "SystemAudioCapture"
 _PACKAGE_ROOT = Path(__file__).resolve().parents[1]
+VALID_BACKENDS = ("auto", "coreaudio", "screencapturekit")
+
+
+def _bundled_binary_candidates() -> list[Path]:
+    """Locations where the pre-compiled helper lives inside a packaged .app."""
+    candidates: list[Path] = []
+    exe_dir = Path(sys.executable).resolve().parent
+    candidates.append(exe_dir / _HELPER_NAME)
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        mp = Path(meipass)
+        candidates.append(mp / _HELPER_NAME)
+        candidates.append(mp / "tools" / _HELPER_NAME)
+    # Standard macOS .app layout: Contents/MacOS/SystemAudioCapture
+    candidates.append(exe_dir.parent / "MacOS" / _HELPER_NAME)
+    return candidates
 
 
 def _source_candidates() -> list[Path]:
-    """Places the Swift source may live in."""
+    """Places the Swift source may live in when running from source."""
     return [
         _PACKAGE_ROOT.parent / "tools" / "SystemAudioCapture.swift",
         _PACKAGE_ROOT / "tools" / "SystemAudioCapture.swift",
@@ -48,16 +67,33 @@ def _source_candidates() -> list[Path]:
 
 
 def _binary_path(source: Path | None) -> Path:
-    """Preferred location for the compiled helper binary."""
+    """Preferred location for the compiled helper binary when running from source."""
     if source is not None and os.access(source.parent, os.W_OK):
         return source.parent / _HELPER_NAME
-    fallback_dir = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "chocolate-egg-cream"
+    fallback_dir = (
+        Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
+        / "chocolate-egg-cream"
+    )
     fallback_dir.mkdir(parents=True, exist_ok=True)
     return fallback_dir / _HELPER_NAME
 
 
 def helper_path() -> Path:
-    """Path of the Swift helper, building or rebuilding it if needed."""
+    """Locate the native macOS audio helper binary.
+
+    In packaged builds (`sys.frozen`), returns the bundled binary directly and
+    never attempts runtime compilation. When running from source, builds or
+    rebuilds the binary if `swiftc` is available.
+    """
+    if getattr(sys, "frozen", False):
+        for candidate in _bundled_binary_candidates():
+            if candidate.is_file() and os.access(candidate, os.X_OK):
+                return candidate
+        raise RuntimeError(
+            "Bundled macOS audio helper (SystemAudioCapture) is missing from the "
+            "application bundle. Please re-install Chocolate Egg Cream."
+        )
+
     source = next((path for path in _source_candidates() if path.exists()), None)
     binary = _binary_path(source)
 
@@ -75,8 +111,9 @@ def helper_path() -> Path:
     compiler = shutil.which("swiftc")
     if compiler is None:
         raise RuntimeError(
-            "The macOS audio helper needs Xcode Command Line Tools to build. "
-            "Run `xcode-select --install` in Terminal, then try again."
+            "Running from source on macOS requires Xcode Command Line Tools to "
+            "build the audio helper (`xcode-select --install`), or download the "
+            "standalone Chocolate Egg Cream.dmg release."
         )
 
     log.info("Building the macOS audio helper with %s ...", compiler)
@@ -91,10 +128,11 @@ def helper_path() -> Path:
 
 
 class MacCapture(AudioCapture):
-    """Captures system audio with ScreenCaptureKit."""
+    """Captures macOS system audio via Core Audio Taps (default) or ScreenCaptureKit."""
 
-    def __init__(self, sample_rate: int = 48000) -> None:
+    def __init__(self, sample_rate: int = 48000, backend: str = "auto") -> None:
         self.sample_rate = sample_rate
+        self.backend = backend if backend in VALID_BACKENDS else "auto"
         self._process: subprocess.Popen | None = None
         self._stdout_thread: threading.Thread | None = None
         self._stderr_thread: threading.Thread | None = None
@@ -104,6 +142,7 @@ class MacCapture(AudioCapture):
         self._chunks: deque[bytes] = deque()
         self._buffered_bytes = 0
         self._stderr_lines: list[str] = []
+        self._info_lines: list[str] = []
         self._eof = False
 
     def open(self) -> None:
@@ -111,11 +150,19 @@ class MacCapture(AudioCapture):
         self._chunks.clear()
         self._buffered_bytes = 0
         self._stderr_lines.clear()
+        self._info_lines.clear()
         self._eof = False
         self._recording = False
 
+        cmd = [
+            str(binary),
+            "--rate",
+            str(self.sample_rate),
+            "--backend",
+            self.backend,
+        ]
         self._process = subprocess.Popen(
-            [str(binary), "--rate", str(self.sample_rate)],
+            cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
@@ -130,7 +177,7 @@ class MacCapture(AudioCapture):
         self._stdout_thread.start()
 
         # Give the helper a brief moment to fail fast on permission errors.
-        deadline = time.monotonic() + 0.4
+        deadline = time.monotonic() + 0.5
         while time.monotonic() < deadline:
             if self._process.poll() is not None:
                 err = self._error_text()
@@ -145,7 +192,14 @@ class MacCapture(AudioCapture):
         try:
             for raw in proc.stderr:
                 line = raw.decode("utf-8", errors="replace").strip()
-                if line:
+                if not line:
+                    continue
+                if line.startswith("info:"):
+                    detail = line[5:].strip()
+                    log.info("macOS audio helper: %s", detail)
+                    with self._lock:
+                        self._info_lines.append(detail)
+                else:
                     with self._lock:
                         self._stderr_lines.append(line)
         except Exception:  # noqa: BLE001
@@ -220,8 +274,9 @@ class MacCapture(AudioCapture):
             raise RuntimeError("The macOS audio helper stopped: " + self._error_text())
         if timed_out:
             raise RuntimeError(
-                "Timed out waiting for Mac system audio. Check that Screen "
-                "Recording permission is granted and audio is playing."
+                "Timed out waiting for macOS system audio. Make sure Chocolate Egg Cream "
+                "is allowed under System Settings -> Privacy & Security -> Screen & System "
+                "Audio Recording (System Audio Recording Only), and that audio is playing."
             )
 
         samples = np.frombuffer(bytes(collected), dtype="<i2").astype(np.float32) / 32768.0
@@ -236,6 +291,12 @@ class MacCapture(AudioCapture):
                 return " ".join(self._stderr_lines)
         return "the helper exited without an error message"
 
+    def request_stop(self) -> None:
+        with self._condition:
+            self._recording = False
+            self._eof = True
+            self._condition.notify_all()
+
     def close(self) -> None:
         proc = self._process
         self._process = None
@@ -244,6 +305,12 @@ class MacCapture(AudioCapture):
             self._eof = True
             self._condition.notify_all()
         if proc is not None:
+            for stream in (proc.stdout, proc.stderr):
+                if stream is not None:
+                    try:
+                        stream.close()
+                    except Exception:  # noqa: BLE001
+                        pass
             try:
                 proc.terminate()
                 proc.wait(timeout=3)

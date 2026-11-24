@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Chocolate Egg Cream
+Comment=Identify playing system audio and scrobble to Last.fm and ListenBrainz
+Exec=chocolate-egg-cream
+Icon=chocolate-egg-cream
+Categories=AudioVideo;Audio;Music;
+Terminal=false
+StartupNotify=true

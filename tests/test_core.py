@@ -146,22 +146,26 @@ def test_lastfm_sign_and_spanish_utf8() -> None:
     check("api_sig is a 32-char md5 hex digest", len(sig_without_format) == 32)
 
 
-def test_song_urls_spanish() -> None:
-    print("song lookup urls (Spanish)")
+def test_song_urls_unicode_and_language_neutral() -> None:
+    print("song lookup urls (Unicode, language-neutral)")
     from chocolate_egg_cream.gui import build_song_urls
 
     track = song("Natalia Lafourcade", "Hasta la Raíz")
     urls = build_song_urls(track)
-    check("translate url uses es->en", "sl=es&tl=en" in urls["translate"])
-    check("translate url encodes Spanish title", "Hasta%20la%20Ra%C3%ADz" in urls["translate"])
-    check("lyrics url includes english translation", "english+translation" in urls["lyrics"])
+    check("translate url is removed", "translate" not in urls)
+    check("lyrics url is language-neutral", "english+translation" not in urls["lyrics"])
+    check("lyrics url ends with lyrics", "lyrics" in urls["lyrics"])
+    check("lyrics url encodes Unicode title", "Hasta+la+Ra%C3%ADz" in urls["lyrics"])
     check("youtube url targets search_query", "youtube.com/results?search_query=" in urls["youtube"])
+
+    jp = song("宇多田ヒカル", "First Love")
+    jp_urls = build_song_urls(jp)
+    check("Japanese Unicode encoded in youtube url", "%E5%AE%87%E5%A4%9A%E7%94%B0" in jp_urls["youtube"])
 
 
 def test_mac_capture_streaming_and_stderr() -> None:
     print("mac capture stream & stderr")
     import io
-    import time
     from chocolate_egg_cream.capture.macos import MacCapture
 
     class FakeProc:
@@ -182,22 +186,171 @@ def test_mac_capture_streaming_and_stderr() -> None:
         def kill(self):
             self._rc = -9
 
-    # Test stderr error reporting when helper stops early
-    cap = MacCapture(sample_rate=48000)
-    cap._process = FakeProc(b"", b"error: Screen Recording permission is required.\n")
+    # Test info: lines are separated from error lines and errors surface cleanly
+    cap = MacCapture(sample_rate=48000, backend="coreaudio")
+    check("backend is preserved", cap.backend == "coreaudio")
+    cap._process = FakeProc(
+        b"",
+        b"info: backend=coreaudio native_rate=48000\n"
+        b"error: System Audio Recording Only permission is required.\n",
+    )
     cap._stderr_lines.clear()
+    cap._info_lines.clear()
     cap._eof = False
     cap._drain_stderr()
     cap._eof = True
+    check("info lines are kept separate", cap._info_lines == ["backend=coreaudio native_rate=48000"])
     try:
         cap.read(0.1)
         check("read raises on helper exit", False)
     except RuntimeError as exc:
         check(
             "stderr message is surfaced in RuntimeError",
-            "Screen Recording permission" in str(exc),
+            "System Audio Recording Only" in str(exc),
             str(exc),
         )
+        check(
+            "info line is not mixed into error text",
+            "native_rate" not in str(exc),
+            str(exc),
+        )
+
+
+def test_shazam_outage_backoff_and_recovery() -> None:
+    print("shazam outage, rate-limit, backoff, and recovery")
+    import asyncio
+    from chocolate_egg_cream.shazam_client import ShazamClient
+
+    now = [100.0]
+
+    class Fake429Error(Exception):
+        status = 429
+        headers = {"Retry-After": "45"}
+
+    class FlakyShazam:
+        def __init__(self, behaviors):
+            self.behaviors = list(behaviors)
+            self.calls = 0
+
+        async def recognize(self, audio, **kwargs):
+            self.calls += 1
+            item = self.behaviors.pop(0)
+            if isinstance(item, BaseException):
+                raise item
+            return item
+
+        async def close(self):
+            pass
+
+    async def run() -> None:
+        # 1. Transient failure with 1 bounded retry -> backoff -> recovery
+        client = ShazamClient(
+            timeout=5.0,
+            max_retries=1,
+            retry_delay=0.0,
+            base_backoff=15.0,
+            max_backoff=120.0,
+            clock=lambda: now[0],
+        )
+        fake = FlakyShazam([
+            ConnectionError("offline"),
+            ConnectionError("still offline"),
+            {"track": {"title": "Recovered Song", "subtitle": "Artist R"}},
+        ])
+        client._shazam = fake
+        client._accepts_options = False
+        client._accepts_max_skew = False
+
+        res1 = await client.recognize(b"wav")
+        check("outage returns None", res1 is None)
+        check("bounded retry ran exactly 2 attempts", fake.calls == 2, f"calls={fake.calls}")
+        check("client enters backoff", client.in_backoff)
+        check("backoff is 15s", abs(client.backoff_remaining - 15.0) < 0.01)
+
+        # Call during backoff must NOT hit network
+        res_skipped = await client.recognize(b"wav")
+        check("during backoff returns None", res_skipped is None)
+        check("no network call during backoff", fake.calls == 2, f"calls={fake.calls}")
+
+        # Advance clock past backoff -> recovers automatically
+        now[0] += 16.0
+        res_ok = await client.recognize(b"wav")
+        check("recovers after backoff", res_ok is not None and res_ok["track"]["title"] == "Recovered Song")
+        check("consecutive failures reset to 0", client.consecutive_failures == 0)
+        check("no longer in backoff", not client.in_backoff)
+
+        # 2. HTTP 429 rate-limit respects Retry-After and does not immediately retry
+        fake429 = FlakyShazam([Fake429Error("too many requests")])
+        client._shazam = fake429
+        res429 = await client.recognize(b"wav")
+        check("429 returns None", res429 is None)
+        check("429 did not immediately retry", fake429.calls == 1, f"calls={fake429.calls}")
+        check("429 respected Retry-After 45s", abs(client.backoff_remaining - 45.0) < 0.01)
+
+    asyncio.run(run())
+
+
+def test_os_credentials_and_settings_roundtrip() -> None:
+    print("os credential store & settings roundtrip")
+    import json
+    import tempfile
+    from chocolate_egg_cream import credentials, settings as settings_module
+
+    # Test real OS credential store write/read/delete using a dedicated test key
+    test_key = "__eggcream_unit_test_secret__"
+    stored = credentials.set_secret(test_key, "s3cr3t-value-日本語")
+    if stored:
+        got = credentials.get_secret(test_key)
+        check("OS credential store round-trips Unicode secret", got == "s3cr3t-value-日本語", repr(got))
+        credentials.delete_secret(test_key)
+        after = credentials.get_secret(test_key)
+        check("OS credential store deletes secret", after is None, repr(after))
+    else:
+        print("  skip  OS credential store unavailable in this environment")
+
+    # Test settings save strips secrets from JSON when keyring succeeds
+    orig_dir = settings_module.config_dir
+    orig_set = credentials.set_secret
+    orig_get = credentials.get_secret
+    fake_vault: dict[str, str] = {}
+
+    def fake_set(k: str, v: str) -> bool:
+        if v:
+            fake_vault[k] = v
+        else:
+            fake_vault.pop(k, None)
+        return True
+
+    def fake_get(k: str) -> str | None:
+        return fake_vault.get(k)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        try:
+            settings_module.config_dir = lambda: Path(tmp)
+            credentials.set_secret = fake_set
+            credentials.get_secret = fake_get
+
+            cfg = dict(settings_module.DEFAULTS)
+            cfg["lastfm_api_key"] = "pub-key"
+            cfg["lastfm_api_secret"] = "top-secret"
+            cfg["lastfm_session_key"] = "sess-123"
+            cfg["listenbrainz_token"] = "lb-tok-456"
+            settings_module.save(cfg)
+
+            raw_json = json.loads((Path(tmp) / "settings.json").read_text(encoding="utf-8"))
+            check("settings.json keeps public api key", raw_json["lastfm_api_key"] == "pub-key")
+            check("settings.json does not store api secret", raw_json["lastfm_api_secret"] == "")
+            check("settings.json does not store session key", raw_json["lastfm_session_key"] == "")
+            check("settings.json does not store listenbrainz token", raw_json["listenbrainz_token"] == "")
+
+            loaded = settings_module.load()
+            check("load restores api secret from vault", loaded["lastfm_api_secret"] == "top-secret")
+            check("load restores session key from vault", loaded["lastfm_session_key"] == "sess-123")
+            check("load restores listenbrainz token from vault", loaded["listenbrainz_token"] == "lb-tok-456")
+        finally:
+            settings_module.config_dir = orig_dir
+            credentials.set_secret = orig_set
+            credentials.get_secret = orig_get
 
 
 def main() -> int:
@@ -209,8 +362,10 @@ def main() -> int:
         test_identity,
         test_wav_roundtrip,
         test_lastfm_sign_and_spanish_utf8,
-        test_song_urls_spanish,
+        test_song_urls_unicode_and_language_neutral,
         test_mac_capture_streaming_and_stderr,
+        test_shazam_outage_backoff_and_recovery,
+        test_os_credentials_and_settings_roundtrip,
     ):
         test()
     print()

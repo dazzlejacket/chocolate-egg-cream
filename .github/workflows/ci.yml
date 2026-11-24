@@ -1,0 +1,39 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    name: Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-latest, macos-15]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-release.txt
+
+      - name: Compile macOS Core Audio Taps helper
+        if: runner.os == 'macOS'
+        run: |
+          swiftc -O -target arm64-apple-macos13.0 -o tools/SystemAudioCapture tools/SystemAudioCapture.swift
+          file tools/SystemAudioCapture
+
+      - name: Run core tests
+        run: python tests/test_core.py
+
+      - name: Run scrobble flow tests
+        run: python tests/test_scrobble_flow.py

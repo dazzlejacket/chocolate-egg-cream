@@ -1,0 +1,2 @@
+# Build-time packaging dependencies (not bundled into the app).
+pyinstaller==6.22.3

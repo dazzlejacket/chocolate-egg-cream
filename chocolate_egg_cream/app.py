@@ -9,7 +9,7 @@ import time
 import numpy as np
 
 from .capture import get_capture
-from .recognize import Recognition, ShazamRecognizer
+from .recognize import Recognition, create_recognizer
 from .scrobble.listenbrainz import ListenBrainz
 from .scrobble.lastfm import LastFM
 from .track import FinishedTrack, TrackState
@@ -41,15 +41,18 @@ class EggCream:
         save_settings=None,
     ) -> None:
         self.settings = settings
-        self.capture = capture if capture is not None else get_capture(sample_rate=48000)
-        max_skew = float(settings.get("max_skew", 0) or 0)
+        self.capture = (
+            capture
+            if capture is not None
+            else get_capture(
+                sample_rate=48000,
+                macos_backend=str(settings.get("macos_capture_backend", "auto") or "auto"),
+            )
+        )
         self.recognizer = (
             recognizer
             if recognizer is not None
-            else ShazamRecognizer(
-                segment_seconds=int(settings["sample_seconds"]),
-                max_skew=max_skew if max_skew > 0 else None,
-            )
+            else create_recognizer(settings)
         )
         self._save_settings = save_settings or settings_module.save
         self.tracks = TrackState(confirmations_required=int(settings["confirmations_required"]))
@@ -113,6 +116,13 @@ class EggCream:
         """Whether the most recent sample had audio (None before first sample)."""
         return self._heard_audio
 
+    @property
+    def recognizer_backoff(self) -> float:
+        """Seconds remaining in recognition outage backoff (0.0 when healthy)."""
+        if getattr(self.recognizer, "in_backoff", False):
+            return float(getattr(self.recognizer, "backoff_remaining", 0.0))
+        return 0.0
+
     # ------------------------------------------------------------- control
 
     async def start(self) -> None:
@@ -133,6 +143,12 @@ class EggCream:
     async def stop(self) -> None:
         """Stop the loop and release the audio device."""
         self._running = False
+        request_stop = getattr(self.capture, "request_stop", None)
+        if callable(request_stop):
+            try:
+                request_stop()
+            except Exception:  # noqa: BLE001
+                pass
         if self._task is not None:
             self._task.cancel()
             try:
@@ -157,6 +173,13 @@ class EggCream:
         """Stop everything and release the network client."""
         await self.stop()
         await self.recognizer.close()
+        for scrobbler in self.scrobblers:
+            close_fn = getattr(scrobbler, "close", None)
+            if callable(close_fn):
+                try:
+                    close_fn()
+                except Exception:  # noqa: BLE001
+                    pass
 
     # ---------------------------------------------------------------- loop
 
