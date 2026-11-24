@@ -8,6 +8,7 @@ D-Bus / secret-tool), callers fall back cleanly to restricted local settings.
 
 from __future__ import annotations
 
+import base64
 import logging
 import os
 import shutil
@@ -126,10 +127,27 @@ def _win_delete(key: str) -> bool:
 
 # ------------------------------------------------------------------- macOS
 
+# macOS `security` prints password data as a hex string whenever it is not
+# printable ASCII, which silently corrupts secrets that contain non-ASCII
+# characters. Secrets are therefore stored base64-encoded (pure ASCII) behind
+# this marker, so the value always round-trips unchanged.
+MAC_ENCODING_PREFIX = "b64:"
+
 
 def _mac_quote(value: str) -> str:
     escaped = value.replace("\\", "\\\\").replace('"', '\\"')
     return f'"{escaped}"'
+
+
+def _mac_decode(raw: str) -> str:
+    """Decode a stored macOS secret, returning it unchanged if unmarked."""
+    if not raw.startswith(MAC_ENCODING_PREFIX):
+        return raw
+    payload = raw[len(MAC_ENCODING_PREFIX) :]
+    try:
+        return base64.b64decode(payload, validate=True).decode("utf-8")
+    except ValueError:
+        return raw
 
 
 def _mac_get(key: str) -> str | None:
@@ -141,15 +159,16 @@ def _mac_get(key: str) -> str | None:
     )
     if result.returncode != 0:
         return None
-    return result.stdout.rstrip("\r\n")
+    return _mac_decode(result.stdout.rstrip("\r\n"))
 
 
 def _mac_set(key: str, value: str) -> bool:
+    payload = MAC_ENCODING_PREFIX + base64.b64encode(value.encode("utf-8")).decode("ascii")
     # Use interactive mode (-i) so the secret is sent over stdin and never
     # appears in the process argument list.
     cmd = (
         f"add-generic-password -U -s {_mac_quote(SERVICE_NAME)} "
-        f"-a {_mac_quote(key)} -w {_mac_quote(value)}\n"
+        f"-a {_mac_quote(key)} -w {_mac_quote(payload)}\n"
     )
     result = subprocess.run(
         ["/usr/bin/security", "-i"],
