@@ -426,7 +426,7 @@ func monoPcmFromSampleBuffer(_ sampleBuffer: CMSampleBuffer) -> Data? {
         bufferListSizeNeededOut: &bufferListSizeNeeded,
         bufferListOut: nil,
         bufferListSize: 0,
-        blockBufferStructureAllocator: nil,
+        blockBufferAllocator: nil,
         blockBufferMemoryAllocator: nil,
         flags: 0,
         blockBufferOut: nil
@@ -446,7 +446,7 @@ func monoPcmFromSampleBuffer(_ sampleBuffer: CMSampleBuffer) -> Data? {
         bufferListSizeNeededOut: nil,
         bufferListOut: audioBufferListPtr,
         bufferListSize: bufferListSizeNeeded,
-        blockBufferStructureAllocator: nil,
+        blockBufferAllocator: nil,
         blockBufferMemoryAllocator: nil,
         flags: kCMSampleBufferFlag_AudioBufferList_Assure16ByteAlignment,
         blockBufferOut: &retainedBlockBuffer
@@ -509,7 +509,10 @@ func startScreenCaptureKit() {
             _ = sem.wait(timeout: .now() + 1.0)
         }
         retainedStream = nil
-        retainedOutput = nil
+        // Keep the audio output alive for the stream's lifetime; drop it on shutdown.
+        if retainedOutput != nil {
+            retainedOutput = nil
+        }
     }
 
     Task {
