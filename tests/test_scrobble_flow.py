@@ -115,7 +115,7 @@ async def main() -> int:
         "sample_seconds": 0.05,
         "confirmations_required": 2,
         "min_play_seconds": 1,
-        "scrobbled": [],
+        "scrobble_events": [],
     }
 
     # A, A confirms A. B, B confirms B and finishes A. A, A confirms A again,
@@ -183,10 +183,12 @@ async def main() -> int:
         [t.title for t in app.history] == ["Song A", "Song B", "Song A"],
         str([t.title for t in app.history]),
     )
+    events = settings.get("scrobble_events", [])
     check(
-        "the scrobbled songs were remembered",
-        set(settings["scrobbled"]) == {"isrc:AAA111", "isrc:BBB222"},
-        str(settings["scrobbled"]),
+        "one scrobble event per playback event, per service",
+        [(e["s"], e["i"]) for e in events]
+        == [("Last.fm", "isrc:AAA111"), ("Last.fm", "isrc:BBB222")],
+        str(events),
     )
     check(
         "the settings were saved after every scrobble",
@@ -220,7 +222,7 @@ async def test_without_a_service() -> int:
         "sample_seconds": 0.05,
         "confirmations_required": 2,
         "min_play_seconds": 1,
-        "scrobbled": [],
+        "scrobble_events": [],
     }
 
     saved = []
@@ -242,9 +244,9 @@ async def test_without_a_service() -> int:
 
     check("nothing was sent to Last.fm", not CALLS, str(CALLS))
     check(
-        "the song was not marked as scrobbled",
-        settings["scrobbled"] == [],
-        str(settings["scrobbled"]),
+        "no scrobble event was recorded when nothing was sent",
+        settings.get("scrobble_events", []) == [],
+        str(settings.get("scrobble_events")),
     )
     check("the settings were not saved", not saved, f"{len(saved)} saves")
 
@@ -304,7 +306,7 @@ async def test_listenbrainz_and_unicode_and_stop() -> int:
             "sample_seconds": 0.05,
             "confirmations_required": 2,
             "min_play_seconds": 1,
-            "scrobbled": [],
+            "scrobble_events": [],
         }
 
         capture = FakeCapture()
@@ -329,11 +331,23 @@ async def test_listenbrainz_and_unicode_and_stop() -> int:
 
         await app.shutdown()
 
-        now_playing = [c for c in lb_calls if c["path"].endswith("/playing-now")]
-        submits = [c for c in lb_calls if c["path"].endswith("/submit-listens")]
+        # Both kinds go to /1/submit-listens now; listen_type tells them apart.
+        check(
+            "every call went to the submit-listens endpoint",
+            all(c["path"].endswith("/submit-listens") for c in lb_calls),
+            str([c["path"] for c in lb_calls]),
+        )
+        now_playing = [
+            c for c in lb_calls if c["body"].get("listen_type") == "playing_now"
+        ]
+        submits = [c for c in lb_calls if c["body"].get("listen_type") == "single"]
         check("ListenBrainz auth header sent", all(c["auth"] == "Token lb-test-token" for c in lb_calls))
         check("ListenBrainz received 2 now-playing calls", len(now_playing) == 2, f"got {len(now_playing)}")
         check("ListenBrainz received 1 scrobble (u1)", len(submits) == 1, f"got {len(submits)}")
+        check(
+            "now-playing payloads carry no listened_at",
+            all("listened_at" not in item for c in now_playing for item in c["body"]["payload"]),
+        )
         if submits:
             meta = submits[0]["body"]["payload"][0]["track_metadata"]
             check("Unicode artist preserved", meta["artist_name"] == "Café Tacvba")

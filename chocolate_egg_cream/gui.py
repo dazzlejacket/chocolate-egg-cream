@@ -7,6 +7,7 @@ window stays responsive while a sample is being captured and recognised.
 from __future__ import annotations
 
 import asyncio
+import logging
 import queue
 import sys
 import threading
@@ -15,9 +16,11 @@ import urllib.parse
 import webbrowser
 from tkinter import ttk
 
-from . import settings as settings_module
+from . import credentials, settings as settings_module
 from .app import EggCream
 from .recognize import Recognition
+
+log = logging.getLogger(__name__)
 
 BACKGROUND = "#fbf7f2"
 SURFACE = "#f3ece3"
@@ -25,6 +28,11 @@ ACCENT = "#7a4a2b"
 TEXT = "#2b2019"
 MUTED = "#7b6d62"
 ERROR_TEXT = "#a33327"
+
+
+def _log_callback_failure(exc: BaseException) -> None:
+    """A deferred callback must never take the window down with it."""
+    log.warning("Deferred GUI callback failed: %s: %s", type(exc).__name__, str(exc)[:160])
 
 
 def _ui_font() -> str:
@@ -53,6 +61,29 @@ def build_song_urls(track: Recognition) -> dict[str, str]:
     }
 
 
+def schedule_after(widget, callback, *args) -> None:
+    """Run `callback(*args)` on the Tk thread on the next tick.
+
+    Arguments are bound *now*, by value. Scheduling `lambda: callback(exc)`
+    instead would capture the `exc` name of an `except` block, which Python
+    unbinds when the block ends -- the callback then raised `NameError` and
+    the real Last.fm error was never shown.
+
+    When the widget owns a deferred queue (see `SetupDialog`), the callable is
+    queued and drained by the Tk thread itself, so a worker thread never calls
+    into Tk directly.
+    """
+    deferred = getattr(widget, "_deferred", None)
+    if deferred is not None:
+        deferred.put((callback, args))
+        return
+    try:
+        widget.after(0, callback, *args)
+    except (RuntimeError, tk.TclError):
+        # The window is already gone; nothing left to report to.
+        pass
+
+
 class SetupDialog(tk.Toplevel):
     """Set the Last.fm and ListenBrainz details without editing JSON."""
 
@@ -61,6 +92,9 @@ class SetupDialog(tk.Toplevel):
         self.settings = settings
         self.on_save = on_save
         self._pending_token: str | None = None
+        # Worker threads never touch Tk directly: they hand us callables here
+        # and the Tk thread drains the queue.
+        self._deferred: queue.Queue = queue.Queue()
 
         self.title("Chocolate Egg Cream — Setup")
         self.configure(background=BACKGROUND)
@@ -178,6 +212,26 @@ class SetupDialog(tk.Toplevel):
         ttk.Button(buttons, text="Save", command=self._save).pack(side="left", padx=(0, 6))
         ttk.Button(buttons, text="Close", command=self.destroy).pack(side="left")
 
+        self._drain()
+
+    # ------------------------------------------------------- thread bridge
+
+    def _drain(self) -> None:
+        """Run everything the worker threads scheduled, on the Tk thread."""
+        try:
+            while True:
+                callback, args = self._deferred.get_nowait()
+                callback(*args)
+        except queue.Empty:
+            pass
+        except Exception as exc:  # noqa: BLE001 - keep the dialog responsive
+            _log_callback_failure(exc)
+        try:
+            if self.winfo_exists():
+                self.after(100, self._drain)
+        except (tk.TclError, RuntimeError):
+            pass
+
     def _entry(self, parent, row: int, label: str, value: str, *, secret: bool = False) -> tk.Entry:
         tk.Label(
             parent,
@@ -206,12 +260,51 @@ class SetupDialog(tk.Toplevel):
         return enabled
 
     def _save(self) -> None:
+        labels = {
+            "lastfm_api_key": "Last.fm API key",
+            "lastfm_api_secret": "Last.fm API secret",
+            "listenbrainz_token": "ListenBrainz token",
+        }
+        new_values = {
+            "lastfm_api_key": credentials.normalize_secret(self.lastfm_key.get()),
+            "lastfm_api_secret": credentials.normalize_secret(self.lastfm_secret.get()),
+            "listenbrainz_token": credentials.normalize_secret(self.lb_token.get()),
+        }
+
+        problems: list[str] = []
+        for key, value in new_values.items():
+            problem = credentials.secret_problem(value)
+            if problem:
+                # Never store a masked placeholder or a corrupted paste: it
+                # used to end up in an Authorization header and crash.
+                problems.append(f"{labels[key]} {problem}")
+                new_values[key] = ""
+
+        # Emptying a field actively forgets the stored credential; a plain
+        # save with an empty value must never wipe it behind the user's back.
+        for key in credentials.SECRET_KEYS:
+            if not new_values[key] and self.settings.get(key):
+                settings_module.clear_secret(key)
+
+        self.settings.update(new_values)
         self.settings["enabled_services"] = self._collect_enabled()
-        self.settings["lastfm_api_key"] = self.lastfm_key.get().strip()
-        self.settings["lastfm_api_secret"] = self.lastfm_secret.get().strip()
-        self.settings["listenbrainz_token"] = self.lb_token.get().strip()
+
+        # Show what was actually stored.
+        self.lastfm_key.delete(0, "end")
+        self.lastfm_key.insert(0, new_values["lastfm_api_key"])
+        self.lastfm_secret.delete(0, "end")
+        self.lastfm_secret.insert(0, new_values["lastfm_api_secret"])
+        self.lb_token.delete(0, "end")
+        self.lb_token.insert(0, new_values["listenbrainz_token"])
+
         self.on_save(self.settings)
-        self.message.set("Saved! Changes apply right away.")
+        if problems:
+            self.message.set(
+                "Saved, but not used: " + "; ".join(problems)
+                + ". Paste the real value and save again."
+            )
+        else:
+            self.message.set("Saved! Changes apply right away.")
 
     def _start_lastfm_auth(self) -> None:
         from .scrobble.lastfm import LastFM
@@ -231,11 +324,12 @@ class SetupDialog(tk.Toplevel):
                 token = lastfm.fetch_token()
                 url = lastfm.auth_url(token)
             except Exception as exc:  # noqa: BLE001
-                self.after(0, lambda: self._on_auth_step1_error(str(exc)))
+                # Bind the message now: `exc` is unbound once this block ends.
+                schedule_after(self, self._on_auth_step1_error, str(exc))
                 return
-            self.after(0, lambda: self._on_auth_step1_ready(token, url))
+            schedule_after(self, self._on_auth_step1_ready, token, url)
 
-        threading.Thread(target=worker, daemon=True).start()
+        threading.Thread(target=worker, daemon=True, name="lastfm-auth-1").start()
 
     def _on_auth_step1_error(self, error: str) -> None:
         self.auth_step1_btn.configure(state="normal")
@@ -277,11 +371,12 @@ class SetupDialog(tk.Toplevel):
                 lastfm = LastFM(api_key=api_key, api_secret=api_secret)
                 session_key = lastfm.exchange_token(token)
             except Exception as exc:  # noqa: BLE001
-                self.after(0, lambda: self._on_auth_step2_error(str(exc)))
+                # Bind the message now: `exc` is unbound once this block ends.
+                schedule_after(self, self._on_auth_step2_error, str(exc))
                 return
-            self.after(0, lambda: self._on_auth_step2_done(api_key, api_secret, session_key))
+            schedule_after(self, self._on_auth_step2_done, api_key, api_secret, session_key)
 
-        threading.Thread(target=worker, daemon=True).start()
+        threading.Thread(target=worker, daemon=True, name="lastfm-auth-2").start()
 
     def _on_auth_step2_error(self, error: str) -> None:
         self.auth_step2_btn.configure(state="normal")
@@ -487,13 +582,18 @@ class EggCreamWindow:
         enabled = self.settings.get("enabled_services", [])
         parts = []
         if "lastfm" in enabled:
+            keys = ("lastfm_api_key", "lastfm_api_secret", "lastfm_session_key")
             ready = all(
-                self.settings.get(key)
-                for key in ("lastfm_api_key", "lastfm_api_secret", "lastfm_session_key")
+                credentials.normalize_secret(self.settings.get(key))
+                and not credentials.secret_problem(self.settings.get(key))
+                for key in keys
             )
             parts.append("Last.fm " + ("ready" if ready else "needs setup"))
         if "listenbrainz" in enabled:
-            ready = bool(self.settings.get("listenbrainz_token"))
+            token = self.settings.get("listenbrainz_token")
+            ready = bool(credentials.normalize_secret(token)) and not credentials.secret_problem(
+                token
+            )
             parts.append("ListenBrainz " + ("ready" if ready else "needs setup"))
         base = " · ".join(parts) if parts else "scrobbling off (just identifying)"
         if self._scrobble_count:
@@ -652,11 +752,13 @@ class EggCreamWindow:
         self._shut_down = True
         if self.engine is not None and self.loop is not None:
             try:
+                # Long enough for the worst case of two scrobblers timing out
+                # on Stop/Quit, so the window never leaves an engine behind.
                 asyncio.run_coroutine_threadsafe(self.engine.shutdown(), self.loop).result(
-                    timeout=20
+                    timeout=40
                 )
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as exc:  # noqa: BLE001
+                log.warning("Engine shutdown did not finish cleanly: %s", type(exc).__name__)
             try:
                 self.loop.call_soon_threadsafe(self.loop.stop)
             except RuntimeError:

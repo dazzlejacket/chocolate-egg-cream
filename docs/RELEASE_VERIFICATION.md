@@ -2,6 +2,32 @@
 
 CI compilation verifies that binaries build cleanly, **not** that live audio capture, permissions, and GUI behavior work on real hardware. Run the checklists below on native macOS and Linux machines before publishing a release.
 
+## Automated Artifact Gate (all platforms)
+
+Every build script (and the CI `package` job on every push) finishes by running
+the **packaged executable's own diagnostics**:
+
+```text
+Chocolate Egg Cream verify            # packaged build (or: python -m chocolate_egg_cream verify)
+```
+
+It writes a JSON report (`dist/verify-report.json`) and exits non-zero on
+failure. It checks, inside the shipped bundle:
+
+- certifi's `cacert.pem` is present and is what `ssl`/`requests`/`aiohttp` will load;
+- **real TLS handshakes** through `requests` (scrobblers) *and* `aiohttp`
+  (the Shazam stack) — so a `CERTIFICATE_VERIFY_FAILED` bundle cannot ship;
+- the recognition stack (`shazamio`, `shazamio_core`, `numpy`) imports;
+- audio capture constructs and (macOS) the bundled `SystemAudioCapture` helper exists;
+- tkinter imports and the settings directory is writable.
+
+SSL verification is never disabled anywhere in this project; the gate proves it
+works, not that it was turned off.
+
+Use `verify --skip-network` for an offline check, and `verify --report <path>`
+to choose where the JSON report goes (a windowed Windows build has no stdout,
+so the report file is the source of truth).
+
 ## macOS Verification (Apple Silicon & Intel)
 
 ### 1. Critical Permission Test (Revoked Terminal Permission)

@@ -5,10 +5,14 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
+import re
 import time
 from typing import Callable
 
 log = logging.getLogger(__name__)
+
+# ShazamIO's own exceptions embed the status as "(status=503)".
+_STATUS_RE = re.compile(r"\bstatus[=:]\s*(\d{3})\b")
 
 
 class RecognitionError(RuntimeError):
@@ -26,6 +30,16 @@ def _extract_http_status(exc: BaseException) -> tuple[int | None, float | None]:
     if status is None:
         response = getattr(exc, "response", None)
         status = getattr(response, "status_code", None)
+    if status is None:
+        # ShazamIO raises its own exceptions for these: they carry no `.status`.
+        name = type(exc).__name__
+        if name == "RateLimited":
+            status = 429
+        else:
+            # `FailedDecodeJson("... (status=503) ...")` and friends.
+            match = _STATUS_RE.search(str(exc))
+            if match:
+                status = int(match.group(1))
     retry_after: float | None = None
     headers = getattr(exc, "headers", None)
     if headers is None:
@@ -39,6 +53,32 @@ def _extract_http_status(exc: BaseException) -> tuple[int | None, float | None]:
             except (TypeError, ValueError):
                 retry_after = None
     return (int(status) if isinstance(status, int) else None, retry_after)
+
+
+def _bounded_http_client():
+    """ShazamIO's own HTTP client, with its retry storm turned down.
+
+    ShazamIO defaults to 20 attempts with up to 60s between them, layered on
+    top of this client's own retry and outage backoff. Two attempts with a
+    short delay keep the total bounded and make failures visible quickly.
+    Returns None when the installed ShazamIO cannot take an injected client.
+    """
+    try:
+        from aiohttp_retry import ExponentialRetry
+        from shazamio.client import HTTPClient
+    except Exception:  # noqa: BLE001 - fall back to ShazamIO's own defaults
+        return None
+    try:
+        return HTTPClient(
+            retry_options=ExponentialRetry(
+                attempts=2,
+                max_timeout=2,
+                # 429 is handled by our own backoff, not by a tight retry loop.
+                statuses={500, 502, 503, 504},
+            )
+        )
+    except Exception:  # noqa: BLE001
+        return None
 
 
 class ShazamClient:
@@ -61,6 +101,7 @@ class ShazamClient:
         self._clock = clock or time.monotonic
 
         self._shazam = None
+        self._http_client = None
         self._accepts_options: bool | None = None
         self._accepts_max_skew: bool | None = None
 
@@ -80,7 +121,13 @@ class ShazamClient:
         if self._shazam is None:
             from shazamio import Shazam
 
-            self._shazam = Shazam()
+            # An injected client is *not* closed by Shazam.close(), so it is
+            # kept here and closed by this class.
+            self._http_client = _bounded_http_client()
+            if self._http_client is not None:
+                self._shazam = Shazam(http_client=self._http_client)
+            else:
+                self._shazam = Shazam()
             params = inspect.signature(self._shazam.recognize).parameters
             self._accepts_options = "options" in params
             self._accepts_max_skew = "max_skew" in params
@@ -168,7 +215,8 @@ class ShazamClient:
                 if status is not None and status >= 500:
                     last_exc_msg = f"server error (HTTP {status})"
                 else:
-                    last_exc_msg = str(exc) or exc.__class__.__name__
+                    # Bounded and credential-free: enough to diagnose, safe to log.
+                    last_exc_msg = (str(exc) or exc.__class__.__name__)[:200]
 
             if attempt + 1 < attempts and self.retry_delay > 0:
                 log.debug(
@@ -192,3 +240,9 @@ class ShazamClient:
                 except Exception:  # noqa: BLE001
                     pass
             self._shazam = None
+        if self._http_client is not None:
+            try:
+                await self._http_client.close()
+            except Exception:  # noqa: BLE001
+                pass
+            self._http_client = None

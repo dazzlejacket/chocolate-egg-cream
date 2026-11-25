@@ -79,6 +79,31 @@ fi
 
 codesign --verify --deep --strict --verbose=2 "$APP_BUNDLE"
 
+# Artifact gate: run the packaged app's own diagnostics before it is
+# packaged into a DMG. Proves the shipped bundle carries its CA certs,
+# audio helper and does a real TLS handshake through both HTTP stacks.
+APP_EXE="$APP_BUNDLE/Contents/MacOS/Chocolate Egg Cream"
+VERIFY_REPORT="dist/verify-report.json"
+echo "Running packaged verify on $APP_EXE ..."
+if ! "$APP_EXE" verify --report "$VERIFY_REPORT"; then
+  echo "ERROR: packaged verify failed" >&2
+  [ -f "$VERIFY_REPORT" ] && cat "$VERIFY_REPORT" >&2
+  exit 1
+fi
+if [ ! -f "$VERIFY_REPORT" ]; then
+  echo "ERROR: packaged verify wrote no report" >&2
+  exit 1
+fi
+"$PYTHON" - "$VERIFY_REPORT" "$VERSION" <<'PY'
+import json, sys
+report = json.load(open(sys.argv[1], encoding="utf-8"))
+if not report.get("ok"):
+    print(json.dumps(report, indent=2)); sys.exit("packaged verify reported failures")
+if report.get("version") != sys.argv[2]:
+    sys.exit(f"packaged verify reports {report['version']}, expected {sys.argv[2]}")
+print(f"Packaged verify: OK ({len(report['checks'])} checks, version {report['version']})")
+PY
+
 # 4. Create drag-to-Applications .dmg.
 RELEASE_DIR="dist/release"
 mkdir -p "$RELEASE_DIR"

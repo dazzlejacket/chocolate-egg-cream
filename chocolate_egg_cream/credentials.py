@@ -24,6 +24,46 @@ SECRET_KEYS = (
     "listenbrainz_token",
 )
 
+# Characters that show up when a masked/placeholder value was pasted instead
+# of the real secret ("••••••••", "********").
+_MASK_CHARS = "*•·●▪∙○◦∙—-#"
+
+
+def normalize_secret(value: object) -> str:
+    """Strip whitespace, newlines and a stray BOM from a pasted secret.
+
+    A trailing newline or a copied BOM used to end up inside an HTTP header
+    and made the request fail before it left the machine.
+    """
+    if value is None:
+        return ""
+    text = str(value)
+    # U+FEFF is the byte order mark: not whitespace, so strip() alone leaves
+    # it behind and it then poisons an HTTP header.
+    return text.replace("\ufeff", "").strip()
+
+
+def secret_problem(value: object) -> str | None:
+    """Explain why a secret cannot be used, or None when it looks usable.
+
+    The message never contains the value itself, so it is safe to log and to
+    show in the GUI. HTTP header values must be Latin-1 encodable; a
+    non-ASCII token (a masked placeholder, a corrupted Keychain read, or a
+    wrong paste) used to crash inside `http.client.putheader`.
+    """
+    text = normalize_secret(value)
+    if not text:
+        return None  # unset, not invalid
+    if any(ord(ch) < 0x20 or ord(ch) > 0x7E for ch in text):
+        return (
+            "contains characters that cannot go into an HTTP header "
+            "(usually a masked placeholder such as •••• or a corrupted paste)"
+        )
+    if len(text) >= 4 and len(set(text)) == 1 and text[0] in _MASK_CHARS:
+        return "looks like a masked placeholder instead of the real value"
+    return None
+
+
 
 # ----------------------------------------------------------------- Windows
 

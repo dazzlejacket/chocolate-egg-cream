@@ -3,6 +3,7 @@
     python -m chocolate_egg_cream             open the window
     python -m chocolate_egg_cream console     run in the terminal instead
     python -m chocolate_egg_cream check       check audio capture & setup readiness
+    python -m chocolate_egg_cream verify      verify this build (packaged or source)
     python -m chocolate_egg_cream test        take one sample and recognise it
     python -m chocolate_egg_cream auth lastfm run the Last.fm authorisation
     python -m chocolate_egg_cream set <key> <value>   change one setting
@@ -132,6 +133,19 @@ def run_check(config: dict) -> int:
     """Verify Python, audio capture helper, GUI, and scrobbler setup."""
     ok = True
     print(f"Python: {sys.version.split()[0]} ({sys.platform})", flush=True)
+    print(
+        f"Build: {'packaged executable' if getattr(sys, 'frozen', False) else 'source tree'}",
+        flush=True,
+    )
+
+    from .certs import find_ca_bundle
+
+    bundle = find_ca_bundle()
+    if bundle:
+        print(f"CA bundle: {bundle}", flush=True)
+    else:
+        print("CA bundle: MISSING -- HTTPS requests would fail (run 'verify')", flush=True)
+        ok = False
 
     try:
         import tkinter  # noqa: F401
@@ -159,16 +173,39 @@ def run_check(config: dict) -> int:
 
     enabled = config.get("enabled_services", [])
     if "lastfm" in enabled:
-        lfm_ready = all(
-            config.get(k) for k in ("lastfm_api_key", "lastfm_api_secret", "lastfm_session_key")
-        )
-        print(f"Last.fm: {'ready' if lfm_ready else 'needs setup (open Setup in the app)'}", flush=True)
+        lfm_keys = ("lastfm_api_key", "lastfm_api_secret", "lastfm_session_key")
+        lfm_missing = [k for k in lfm_keys if not credentials.normalize_secret(config.get(k))]
+        lfm_bad = [k for k in lfm_keys if credentials.secret_problem(config.get(k))]
+        if lfm_missing:
+            print(
+                f"Last.fm: needs setup (missing {', '.join(lfm_missing)}; "
+                "open Setup in the app)",
+                flush=True,
+            )
+        elif lfm_bad:
+            print(
+                f"Last.fm: not usable ({', '.join(lfm_bad)} has an invalid value; "
+                "re-enter it in Setup)",
+                flush=True,
+            )
+        else:
+            print("Last.fm: ready", flush=True)
     if "listenbrainz" in enabled:
-        lb_ready = bool(config.get("listenbrainz_token"))
-        print(f"ListenBrainz: {'ready' if lb_ready else 'needs setup (open Setup in the app)'}", flush=True)
+        token = config.get("listenbrainz_token")
+        if not credentials.normalize_secret(token):
+            print("ListenBrainz: needs setup (no token; open Setup in the app)", flush=True)
+        elif credentials.secret_problem(token):
+            print(
+                "ListenBrainz: not usable (token is invalid; re-enter it in Setup)",
+                flush=True,
+            )
+        else:
+            print("ListenBrainz: ready", flush=True)
 
     print(f"Settings file: {settings_module.settings_path()}", flush=True)
     print(f"Log file:      {settings_module.log_path()}", flush=True)
+    if not bundle:
+        print("\nRun 'verify' for the full packaged-build diagnostics.", flush=True)
     return 0 if ok else 1
 
 
@@ -263,6 +300,46 @@ async def run_app(config: dict) -> int:
 # --------------------------------------------------------------------- main
 
 
+def _run_single_instance(run, config: dict, *, want_gui: bool) -> int:
+    """Run `run(config)` while holding the single-instance lock.
+
+    Two instances at once would recognise the same music twice, scrobble it
+    twice and fight over settings.json.
+    """
+    import atexit
+
+    from . import instance
+
+    try:
+        instance.acquire()
+    except instance.AlreadyRunning as exc:
+        return _report_already_running(exc, want_gui=want_gui)
+    except Exception as exc:  # noqa: BLE001 - a broken lock must not block the app
+        print(f"Warning: could not take the instance lock ({exc}); continuing.", flush=True)
+    atexit.register(instance.release)
+    try:
+        return run(config)
+    finally:
+        instance.release()
+
+
+def _report_already_running(exc: instance.AlreadyRunning, *, want_gui: bool) -> int:
+    if want_gui:
+        try:
+            import tkinter as tk
+            from tkinter import messagebox
+
+            root = tk.Tk()
+            root.withdraw()
+            messagebox.showwarning("Chocolate Egg Cream", str(exc))
+            root.destroy()
+            return 3
+        except Exception:  # noqa: BLE001 - no display: fall back to the console
+            pass
+    print(str(exc), flush=True)
+    return 3
+
+
 def main() -> int:
     # Windows consoles default to a legacy code page; the em dash in the
     # output would come out as mojibake. In windowed builds stdout/stderr may be None.
@@ -283,13 +360,19 @@ def main() -> int:
     settings_module.setup_logging(config.get("log_level", "INFO"))
 
     if not args:
-        return run_gui(config)
+        return _run_single_instance(run_gui, config, want_gui=True)
 
     command = args[0]
+    if command == "verify":
+        from . import verify as verify_module
+
+        return verify_module.main(args[1:])
     if command == "console":
-        return asyncio.run(run_app(config))
+        return _run_single_instance(
+            lambda cfg: asyncio.run(run_app(cfg)), config, want_gui=False
+        )
     if command == "gui":
-        return run_gui(config)
+        return _run_single_instance(run_gui, config, want_gui=True)
     if command == "check":
         return run_check(config)
     if command == "test":
@@ -304,7 +387,17 @@ def main() -> int:
             print("Usage: python -m chocolate_egg_cream set <key> <value>", flush=True)
             return 2
         key, value = args[1], " ".join(args[2:])
-        if key in ("enabled_services", "scrobbled"):
+        if key in credentials.SECRET_KEYS:
+            problem = credentials.secret_problem(value)
+            if problem:
+                print(f"{key} was not saved: {problem}", flush=True)
+                return 1
+            if not value.strip():
+                # Empty means "forget this credential" and must actively
+                # remove it from the OS credential store.
+                settings_module.clear_secret(key)
+                config[key] = ""
+        if key in ("enabled_services",):
             config[key] = [item.strip() for item in value.split(",") if item.strip()]
         elif key == "max_skew":
             config[key] = float(value)

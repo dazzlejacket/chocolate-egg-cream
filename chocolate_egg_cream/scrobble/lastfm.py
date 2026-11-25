@@ -15,10 +15,15 @@ import urllib.parse
 
 import requests
 
+from .. import credentials
+
 log = logging.getLogger(__name__)
 
 API_ROOT = "https://ws.audioscrobbler.com/2.0/"
 AUTH_ROOT = "https://www.last.fm/api/auth/"
+
+# Never let a request hang the shutdown path: Stop/Quit must stay responsive.
+DEFAULT_TIMEOUT = 10.0
 
 
 def sign(params: dict[str, str], secret: str) -> str:
@@ -45,21 +50,63 @@ class LastFM:
         api_key: str,
         api_secret: str,
         session_key: str = "",
-        timeout: float = 15.0,
+        timeout: float = DEFAULT_TIMEOUT,
     ) -> None:
-        self.api_key = api_key
-        self.api_secret = api_secret
-        self.session_key = session_key
+        self.api_key = credentials.normalize_secret(api_key)
+        self.api_secret = credentials.normalize_secret(api_secret)
+        self.session_key = credentials.normalize_secret(session_key)
         self.timeout = timeout
+        self.last_error: str | None = None
+        self._problems = {
+            "API key": credentials.secret_problem(self.api_key),
+            "API secret": credentials.secret_problem(self.api_secret),
+            "session key": credentials.secret_problem(self.session_key),
+        }
+        for label, problem in self._problems.items():
+            if problem:
+                # The reason only: never the value.
+                log.warning(
+                    "Last.fm %s is not usable (%s). Re-enter it under Setup… -> Last.fm.",
+                    label,
+                    problem,
+                )
         self._session = requests.Session()
         self._session.headers.update({"User-Agent": "ChocolateEggCream/1.0"})
 
     @property
     def configured(self) -> bool:
-        return bool(self.api_key and self.api_secret and self.session_key)
+        if not (self.api_key and self.api_secret and self.session_key):
+            return False
+        return all(problem is None for problem in self._problems.values())
+
+    @property
+    def problem(self) -> str | None:
+        """Why Last.fm cannot be used, or None when it is ready."""
+        missing = [
+            label
+            for label, value in (
+                ("API key", self.api_key),
+                ("API secret", self.api_secret),
+                ("session key", self.session_key),
+            )
+            if not value
+        ]
+        if missing:
+            return "missing " + ", ".join(missing)
+        for label, problem in self._problems.items():
+            if problem:
+                return f"{label} {problem}"
+        return None
 
     def fetch_token(self) -> str:
         """Request a temporary auth token for the desktop authorisation flow."""
+        if not self.api_key or not self.api_secret:
+            raise RuntimeError("Last.fm needs an API key and an API secret before authorising.")
+        problem = credentials.secret_problem(self.api_key) or credentials.secret_problem(
+            self.api_secret
+        )
+        if problem:
+            raise RuntimeError(f"The Last.fm credentials cannot be used: {problem}")
         params = {
             "method": "auth.getToken",
             "api_key": self.api_key,
@@ -86,6 +133,8 @@ class LastFM:
 
     def exchange_token(self, token: str) -> str:
         """Trade the approved token for a permanent session key."""
+        if not self.api_key or not self.api_secret:
+            raise RuntimeError("Last.fm needs an API key and an API secret before authorising.")
         params = {
             "method": "auth.getSession",
             "api_key": self.api_key,
@@ -145,25 +194,35 @@ class LastFM:
         return self._call(params)
 
     def _call(self, params: dict[str, str]) -> bool:
+        if not self.configured:
+            self.last_error = self.problem or "not configured"
+            log.warning("Last.fm call skipped: %s", self.last_error)
+            return False
         params["api_sig"] = sign(params, self.api_secret)
         params["format"] = "json"
         try:
             # Last.fm write methods (track.scrobble, track.updateNowPlaying) require POST.
             response = self._session.post(API_ROOT, data=params, timeout=self.timeout)
             response.raise_for_status()
-        except requests.RequestException as exc:
-            log.warning("Last.fm request failed: %s", exc.__class__.__name__)
+        except (requests.RequestException, UnicodeEncodeError, ValueError) as exc:
+            # ValueError/UnicodeEncodeError cover malformed header/field values,
+            # which must not escape into the recognition loop.
+            self.last_error = f"{type(exc).__name__}: {str(exc)[:160]}"
+            log.warning("Last.fm request failed: %s", self.last_error)
             return False
 
         try:
             body = response.json()
         except ValueError:
-            log.warning("Last.fm returned a non-JSON response")
+            self.last_error = f"non-JSON response (HTTP {response.status_code})"
+            log.warning("Last.fm returned a non-JSON response (HTTP %s)", response.status_code)
             return False
 
         if "error" in body:
-            log.warning("Last.fm error %s: %s", body.get("error"), body.get("message"))
+            self.last_error = f"error {body.get('error')}: {body.get('message')}"
+            log.warning("Last.fm refused the call: %s", self.last_error)
             return False
+        self.last_error = None
         return True
 
     def close(self) -> None:

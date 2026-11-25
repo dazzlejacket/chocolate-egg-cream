@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import sys
+import threading
 import warnings
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
@@ -14,6 +15,10 @@ from typing import Any
 from . import credentials
 
 log = logging.getLogger(__name__)
+
+# Serialises every read/modify/write of settings.json so the GUI thread, the
+# engine thread and a second process cannot interleave writes.
+_SAVE_LOCK = threading.Lock()
 
 DEFAULTS: dict[str, Any] = {
     # Last.fm
@@ -39,9 +44,22 @@ DEFAULTS: dict[str, Any] = {
     "max_skew": 0,
     # A track with no known duration has to play this long before it counts.
     "min_play_seconds": 120,
-    # Songs already scrobbled, so the same song is never sent twice.
-    "scrobbled": [],
+    # Recently submitted scrobble events (per service, per playback event).
+    # This replaces the old "scrobbled" list, which blocked songs forever.
+    "scrobble_events": [],
 }
+
+KNOWN_SERVICES = ("lastfm", "listenbrainz")
+
+_INT_SETTINGS = (
+    "interval_seconds",
+    "sample_seconds",
+    "confirmations_required",
+    "min_play_seconds",
+)
+_FLOAT_SETTINGS = ("max_skew",)
+_LIST_SETTINGS = ("enabled_services", "scrobble_events", "scrobbled")
+
 
 
 def config_dir() -> Path:
@@ -70,6 +88,79 @@ def _restrict_file_permissions(path: Path) -> None:
             pass
 
 
+def _atomic_write(path: Path, text: str) -> None:
+    """Write settings in one atomic replace.
+
+    A half-written settings.json used to be possible when two threads (or two
+    instances) wrote at the same time, and a crash mid-write left a corrupt
+    file behind. Readers now only ever see the old or the new file.
+    """
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    tmp.write_text(text, encoding="utf-8")
+    _restrict_file_permissions(tmp)
+    os.replace(tmp, path)
+    _restrict_file_permissions(path)
+
+
+def _quarantine_corrupt(path: Path, exc: Exception) -> None:
+    """Move an unreadable settings file aside instead of silently losing it."""
+    backup = path.with_name(f"{path.name}.invalid")
+    try:
+        if backup.exists():
+            backup.unlink()
+        path.replace(backup)
+        log.warning(
+            "Settings file %s could not be read (%s: %s); it was moved to %s "
+            "and defaults are in use.",
+            path,
+            type(exc).__name__,
+            exc,
+            backup,
+        )
+    except OSError:
+        log.warning(
+            "Settings file %s could not be read (%s: %s); defaults are in use.",
+            path,
+            type(exc).__name__,
+            exc,
+        )
+
+
+def validate(data: dict[str, Any]) -> dict[str, Any]:
+    """Coerce what was read from disk back into the types the app expects."""
+    checked = dict(DEFAULTS)
+    checked.update(data)
+
+    for key in _INT_SETTINGS:
+        if key in checked:
+            try:
+                checked[key] = int(checked[key])
+            except (TypeError, ValueError):
+                log.warning("Setting %s was %r; using %r", key, checked[key], DEFAULTS[key])
+                checked[key] = DEFAULTS[key]
+    for key in _FLOAT_SETTINGS:
+        if key in checked:
+            try:
+                checked[key] = float(checked[key])
+            except (TypeError, ValueError):
+                log.warning("Setting %s was %r; using %r", key, checked[key], DEFAULTS[key])
+                checked[key] = DEFAULTS[key]
+    for key in _LIST_SETTINGS:
+        if key in checked and isinstance(checked[key], str):
+            checked[key] = [checked[key]]
+        if key in checked and not isinstance(checked[key], list):
+            log.warning("Setting %s was not a list; using %r", key, DEFAULTS[key])
+            checked[key] = DEFAULTS[key]
+
+    enabled = checked.get("enabled_services") or []
+    checked["enabled_services"] = [name for name in enabled if name in KNOWN_SERVICES]
+
+    for key in ("lastfm_api_key", *credentials.SECRET_KEYS):
+        checked[key] = str(checked.get(key) or "")
+
+    return checked
+
+
 def load(*, use_os_keyring: bool = True) -> dict[str, Any]:
     """Read the settings, loading secrets from the OS credential store when available."""
     data = dict(DEFAULTS)
@@ -81,12 +172,14 @@ def load(*, use_os_keyring: bool = True) -> dict[str, Any]:
             stored = json.loads(path.read_text(encoding="utf-8"))
             if isinstance(stored, dict):
                 data.update(stored)
+            else:
+                _quarantine_corrupt(path, ValueError("not a JSON object"))
         except (OSError, json.JSONDecodeError) as exc:
-            log.warning("Could not read %s: %s", path, exc)
+            _quarantine_corrupt(path, exc)
 
     if use_os_keyring:
         for key in credentials.SECRET_KEYS:
-            file_value = str(data.get(key) or "")
+            file_value = credentials.normalize_secret(data.get(key))
             stored_secret = credentials.get_secret(key)
             if stored_secret:
                 data[key] = stored_secret
@@ -100,27 +193,47 @@ def load(*, use_os_keyring: bool = True) -> dict[str, Any]:
         if plaintext_migrated:
             save(data, use_os_keyring=True)
 
-    return data
+    return validate(data)
 
 
 def save(data: dict[str, Any], *, use_os_keyring: bool = True) -> None:
     """Write settings to disk, storing secrets in the OS credential store where available."""
+    with _SAVE_LOCK:
+        _save_locked(data, use_os_keyring=use_os_keyring)
+
+
+def _save_locked(data: dict[str, Any], *, use_os_keyring: bool) -> None:
     to_write = dict(data)
 
     if use_os_keyring:
         for key in credentials.SECRET_KEYS:
-            secret_value = str(data.get(key) or "")
-            if credentials.set_secret(key, secret_value):
-                # Stored safely in OS credential manager; keep JSON free of plaintext secrets.
+            value = credentials.normalize_secret(data.get(key))
+            if value and credentials.set_secret(key, value):
+                # Stored safely in OS credential manager; keep JSON free of
+                # plaintext secrets.
                 to_write[key] = ""
+            elif not value:
+                # An empty value never deletes a stored secret: a partial save
+                # must not wipe credentials that another call still holds.
+                # Clearing is explicit, through clear_secret().
+                if credentials.get_secret(key):
+                    to_write[key] = ""
 
     path = settings_path()
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(to_write, indent=2, ensure_ascii=False), encoding="utf-8")
-        _restrict_file_permissions(path)
+        _atomic_write(path, json.dumps(to_write, indent=2, ensure_ascii=False))
     except OSError as exc:
         log.warning("Could not write %s: %s", path, exc)
+
+
+def clear_secret(key: str) -> None:
+    """Explicitly delete a stored secret (used when a credential is emptied)."""
+    if key not in credentials.SECRET_KEYS:
+        return
+    with _SAVE_LOCK:
+        credentials.delete_secret(key)
+
 
 
 def setup_logging(level: str = "INFO") -> None:

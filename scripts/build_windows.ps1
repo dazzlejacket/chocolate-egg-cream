@@ -29,6 +29,31 @@ if (-not (Test-Path $BuiltExe)) {
     throw "Expected output executable not found: $BuiltExe"
 }
 
+# Artifact gate: run the packaged executable's own diagnostics. This proves
+# the shipped EXE (not the source tree) has its CA bundle, recognition stack,
+# audio capture helper and does a real TLS handshake. Windowed build: the
+# result goes to a JSON report because stdout does not exist there.
+$VerifyReport = Join-Path $RepoRoot "dist\verify-report.json"
+$verify = Start-Process -FilePath $BuiltExe -ArgumentList @(
+    "verify", "--report", "`"$VerifyReport`""
+) -Wait -PassThru
+if ($verify.ExitCode -ne 0) {
+    if (Test-Path $VerifyReport) { Get-Content $VerifyReport | Write-Host }
+    throw "Packaged verify failed with exit code $($verify.ExitCode)"
+}
+if (-not (Test-Path $VerifyReport)) {
+    throw "Packaged verify wrote no report: $VerifyReport"
+}
+$report = Get-Content $VerifyReport -Raw | ConvertFrom-Json
+if (-not $report.ok) {
+    Get-Content $VerifyReport | Write-Host
+    throw "Packaged verify reported failures"
+}
+if ($report.version -ne $Version) {
+    throw "Packaged verify reports version $($report.version), expected $Version"
+}
+Write-Host "Packaged verify: OK ($($report.checks.Count) checks, version $($report.version))"
+
 $ReleaseDir = Join-Path $RepoRoot "dist\release"
 New-Item -ItemType Directory -Force -Path $ReleaseDir | Out-Null
 

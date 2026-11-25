@@ -32,16 +32,32 @@ datas = []
 binaries = []
 hiddenimports = [
     "chocolate_egg_cream",
+    "chocolate_egg_cream.certs",
     "chocolate_egg_cream.capture",
+    "chocolate_egg_cream.instance",
     "chocolate_egg_cream.scrobble",
     "chocolate_egg_cream.scrobble.lastfm",
     "chocolate_egg_cream.scrobble.listenbrainz",
+    "chocolate_egg_cream.verify",
     "tkinter",
     "tkinter.ttk",
 ]
 
 # Bundle shazamio + shazamio_core (native Rust extension) + certifi CA certs.
+# The CA bundle is what makes TLS verification work inside the bundle: without
+# it aiohttp/ssl has no trust anchors on macOS and Linux (CERTIFICATE_VERIFY
+# FAILED against Shazam). Verification itself is never disabled.
 datas += collect_data_files("certifi")
+cacert_bundles = [
+    src
+    for src, dest, *_ in datas
+    if os.path.basename(src) == "cacert.pem"
+]
+if not cacert_bundles:
+    raise SystemExit(
+        "certifi's cacert.pem was not collected: packaged builds would fail "
+        "TLS verification. Refusing to build a broken artifact."
+    )
 datas += collect_data_files("shazamio")
 binaries += collect_dynamic_libs("shazamio_core")
 hiddenimports += collect_submodules("shazamio")
@@ -85,7 +101,9 @@ a = Analysis(
     hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},
-    runtime_hooks=[],
+    # Runs before the app's own code so ssl/aiohttp/requests all trust the
+    # bundled cacert.pem from the first connection.
+    runtime_hooks=[str(ROOT / "packaging" / "runtime_hook.py")],
     excludes=excludes,
     noarchive=False,
 )

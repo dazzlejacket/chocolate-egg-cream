@@ -88,9 +88,10 @@ The window stays deliberately small:
 - **Outage resilience**: timeouts, HTTP 429 rate limits, and Shazam outages use
   bounded retries and exponential backoff with automatic recovery. Network
   failures never end the current track or trigger false song changes.
-- **Duplicate protection**: each track identity (ISRC or normalized
-  artist/title) is remembered so stale or repeated matches are never scrobbled
-  twice.
+- **Duplicate protection**: scrobble history is tracked **per service, per
+  playback event**: the same listen is never submitted twice (across restarts
+  too), but a song played again later is scrobbled again as a new listen, and
+  one service's history never blocks the other.
 - **Playtime rule**: playtime only advances while audio is actually heard. A
   track scrobbles when it plays at least half its duration (capped at 4
   minutes), or `min_play_seconds` (default 120s) when duration is unknown.
@@ -130,11 +131,15 @@ CLI commands:
 - `python -m chocolate_egg_cream` — open GUI
 - `python -m chocolate_egg_cream console` — terminal mode
 - `python -m chocolate_egg_cream check` — verify capture & scrobbler readiness
+- `python -m chocolate_egg_cream verify` — verify this build: CA bundle, real TLS through both HTTP stacks, recognition stack, audio capture (used as the packaging gate; run it on the packaged executable too)
 - `python -m chocolate_egg_cream test` — capture one sample and identify it
 - `python -m chocolate_egg_cream auth lastfm` — terminal Last.fm auth
 - `python -m chocolate_egg_cream set <key> <value>` — update a setting
 - `python -m chocolate_egg_cream settings` — print settings file path
 - `python -m chocolate_egg_cream --version` — print version
+
+Only one instance runs at a time: starting a second one shows a warning instead
+of recognising (and scrobbling) the same music twice.
 
 ### Reproducible Release Builds
 
@@ -144,6 +149,11 @@ Install build dependencies (`pip install -r requirements-release.txt -r requirem
 - macOS (Apple Silicon / Intel): `bash scripts/build_macos.sh`
 - Linux x86_64: `bash scripts/build_linux.sh`
 
+Each script finishes by running the **packaged executable's own `verify`
+command** (CA bundle present, real TLS handshake through `requests` and
+`aiohttp`, recognition stack, audio helper) and fails the build if the
+artifact would ship broken. CI runs the same gate on every push.
+
 See [docs/RELEASE_VERIFICATION.md](docs/RELEASE_VERIFICATION.md) for signing,
 notarization, and native hardware verification checklists.
 
@@ -152,4 +162,5 @@ notarization, and native hardware verification checklists.
 ```bash
 python tests/test_core.py
 python tests/test_scrobble_flow.py
+python tests/test_regressions.py   # one test per v1.0.1 bug fix
 ```

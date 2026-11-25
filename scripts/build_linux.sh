@@ -25,6 +25,30 @@ if [ ! -x "$BUNDLE_DIR/chocolate-egg-cream" ]; then
   exit 1
 fi
 
+# Artifact gate: run the packaged executable's own diagnostics. Proves the
+# shipped bundle carries its CA certs, recognition stack and does a real
+# TLS handshake through both HTTP stacks (requests + aiohttp/Shazam).
+VERIFY_REPORT="dist/verify-report.json"
+echo "Running packaged verify on $BUNDLE_DIR/chocolate-egg-cream ..."
+if ! "$BUNDLE_DIR/chocolate-egg-cream" verify --report "$VERIFY_REPORT"; then
+  echo "ERROR: packaged verify failed" >&2
+  [ -f "$VERIFY_REPORT" ] && cat "$VERIFY_REPORT" >&2
+  exit 1
+fi
+if [ ! -f "$VERIFY_REPORT" ]; then
+  echo "ERROR: packaged verify wrote no report" >&2
+  exit 1
+fi
+"$PYTHON" - "$VERIFY_REPORT" "$VERSION" <<'PY'
+import json, sys
+report = json.load(open(sys.argv[1], encoding="utf-8"))
+if not report.get("ok"):
+    print(json.dumps(report, indent=2)); sys.exit("packaged verify reported failures")
+if report.get("version") != sys.argv[2]:
+    sys.exit(f"packaged verify reports {report['version']}, expected {sys.argv[2]}")
+print(f"Packaged verify: OK ({len(report['checks'])} checks, version {report['version']})")
+PY
+
 RELEASE_DIR="dist/release"
 mkdir -p "$RELEASE_DIR"
 
@@ -61,6 +85,16 @@ if command -v appimagetool >/dev/null 2>&1; then
     sha256sum "$APPIMAGE_NAME" > "${APPIMAGE_NAME}.sha256"
   )
   echo "Created: ${RELEASE_DIR}/${APPIMAGE_NAME} ($(du -h "${RELEASE_DIR}/${APPIMAGE_NAME}" | cut -f1))"
+
+  # Gate the *shipped* AppImage too: it must start and pass its own checks.
+  APPIMAGE_VERIFY="dist/verify-appimage.json"
+  echo "Running packaged verify on the AppImage ..."
+  if ! ARCH="$ARCH" APPIMAGE_EXTRACT_AND_RUN=1 \
+      "${RELEASE_DIR}/${APPIMAGE_NAME}" verify --report "$APPIMAGE_VERIFY"; then
+    echo "ERROR: AppImage verify failed" >&2
+    [ -f "$APPIMAGE_VERIFY" ] && cat "$APPIMAGE_VERIFY" >&2
+    exit 1
+  fi
 else
   echo "Note: appimagetool not installed; skipped .AppImage (portable .tar.gz was created)."
 fi
