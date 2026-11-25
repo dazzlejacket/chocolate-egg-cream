@@ -283,7 +283,7 @@ class SetupDialog(tk.Toplevel):
         # Emptying a field actively forgets the stored credential; a plain
         # save with an empty value must never wipe it behind the user's back.
         for key in credentials.SECRET_KEYS:
-            if not new_values[key] and self.settings.get(key):
+            if key in new_values and not new_values[key] and self.settings.get(key):
                 settings_module.clear_secret(key)
 
         self.settings.update(new_values)
