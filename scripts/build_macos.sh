@@ -46,7 +46,7 @@ file tools/SystemAudioCapture
 rm -rf build dist
 
 BUNDLED_CREDS="chocolate_egg_cream/_bundled_lastfm.py"
-cleanup_creds() { [ -f "$BUNDLED_CREDS" ] && rm -f "$BUNDLED_CREDS"; }
+cleanup_creds() { rm -f "$BUNDLED_CREDS"; }
 trap cleanup_creds EXIT
 if [ -n "${CEC_LASTFM_API_KEY:-}" ] && [ -n "${CEC_LASTFM_API_SECRET:-}" ]; then
   "$PYTHON" - "$BUNDLED_CREDS" <<'PY'
