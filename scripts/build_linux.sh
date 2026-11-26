@@ -83,7 +83,7 @@ mkdir -p "$APPDIR/usr/bin" "$APPDIR/usr/lib/chocolate-egg-cream"
 cp -a "$BUNDLE_DIR/." "$APPDIR/usr/lib/chocolate-egg-cream/"
 cp packaging/linux/chocolate-egg-cream.desktop "$APPDIR/chocolate-egg-cream.desktop"
 cp packaging/icons/png/icon-256.png "$APPDIR/chocolate-egg-cream.png"
-ln -sf chocolate-egg-cream.png "$APPDIR/.DirIcon"
+cp packaging/icons/png/icon-256.png "$APPDIR/.DirIcon"
 mkdir -p "$APPDIR/usr/share/icons/hicolor/scalable/apps"
 cp packaging/linux/chocolate-egg-cream.svg "$APPDIR/usr/share/icons/hicolor/scalable/apps/chocolate-egg-cream.svg"
 for sz in 16 32 48 64 128 256 512; do
