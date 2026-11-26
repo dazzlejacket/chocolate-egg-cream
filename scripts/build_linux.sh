@@ -82,7 +82,10 @@ mkdir -p "$APPDIR/usr/bin" "$APPDIR/usr/lib/chocolate-egg-cream"
 
 cp -a "$BUNDLE_DIR/." "$APPDIR/usr/lib/chocolate-egg-cream/"
 cp packaging/linux/chocolate-egg-cream.desktop "$APPDIR/chocolate-egg-cream.desktop"
-cp packaging/linux/chocolate-egg-cream.svg "$APPDIR/chocolate-egg-cream.svg"
+cp packaging/icons/png/icon-256.png "$APPDIR/chocolate-egg-cream.png"
+ln -sf chocolate-egg-cream.png "$APPDIR/.DirIcon"
+mkdir -p "$APPDIR/usr/share/icons/hicolor/scalable/apps"
+cp packaging/linux/chocolate-egg-cream.svg "$APPDIR/usr/share/icons/hicolor/scalable/apps/chocolate-egg-cream.svg"
 for sz in 16 32 48 64 128 256 512; do
   if [ -f "packaging/icons/png/icon-${sz}.png" ]; then
     mkdir -p "$APPDIR/usr/share/icons/hicolor/${sz}x${sz}/apps"
