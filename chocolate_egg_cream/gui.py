@@ -96,9 +96,10 @@ def _apply_app_icon(window: tk.Misc) -> tk.PhotoImage | None:
         except Exception:  # noqa: BLE001
             pass
 
+    png128 = assets / "icon-128.png"
     png64 = assets / "icon-64.png"
     png32 = assets / "icon-32.png"
-    for candidate in (png64, png32):
+    for candidate in (png128, png64, png32):
         if candidate.is_file():
             try:
                 img = tk.PhotoImage(file=str(candidate))
@@ -109,16 +110,25 @@ def _apply_app_icon(window: tk.Misc) -> tk.PhotoImage | None:
     return None
 
 
-def _load_header_mark() -> tk.PhotoImage | None:
-    """Load a crisp 16x16 header mark from the bundled 32x32 egg icon."""
-    png32 = _assets_dir() / "icon-32.png"
-    if not png32.is_file():
-        return None
-    try:
-        full = tk.PhotoImage(file=str(png32))
-        return full.subsample(2, 2)
-    except Exception:  # noqa: BLE001
-        return None
+def _load_header_mark(scale: float = 1.0) -> tk.PhotoImage | None:
+    """Load a crisp DPI-appropriate header mark from bundled purple egg icons."""
+    assets = _assets_dir()
+    # Pick a native-resolution PNG matching the display scale so Tk never upscales.
+    if scale >= 1.75:
+        candidates = [("icon-48.png", 1), ("icon-64.png", 2), ("icon-32.png", 1)]
+    elif scale >= 1.25:
+        candidates = [("icon-32.png", 1), ("icon-64.png", 2)]
+    else:
+        candidates = [("icon-48.png", 2), ("icon-64.png", 3), ("icon-32.png", 2)]
+    for fname, sub in candidates:
+        path = assets / fname
+        if path.is_file():
+            try:
+                img = tk.PhotoImage(file=str(path))
+                return img.subsample(sub, sub) if sub > 1 else img
+            except Exception:  # noqa: BLE001
+                continue
+    return None
 
 
 def _open_folder(path: Path) -> None:
@@ -622,10 +632,17 @@ class SetupDialog(tk.Toplevel):
         ).pack(side="left")
         ttk.Button(
             lb_header,
-            text="Get user token",
+            text="Get token",
             style="Compact.TButton",
             command=lambda: webbrowser.open("https://listenbrainz.org/settings/"),
         ).pack(side="right")
+        self.verify_lb_btn = ttk.Button(
+            lb_header,
+            text="Verify",
+            style="Compact.TButton",
+            command=self._verify_lb_token,
+        )
+        self.verify_lb_btn.pack(side="right", padx=(0, 5))
 
         self.lb_token = self._entry(
             frame, 6, "User token", self.settings.get("listenbrainz_token", ""), secret=True
@@ -649,7 +666,7 @@ class SetupDialog(tk.Toplevel):
         ext_cb = self._check(
             ext_row,
             role="fg" if self._ext_supported else "muted",
-            text="EXTERNAL SCROBBLER MODE (Pano Scrobbler / OS media session)",
+            text="EXTERNAL MEDIA SESSION (OS media controls / SMTC / MPRIS)",
             variable=self.use_external,
             font=(FONT, 8, "bold"),
             state="normal" if self._ext_supported else "disabled",
@@ -776,18 +793,32 @@ class SetupDialog(tk.Toplevel):
             self.adv_frame.grid_remove()
 
     def _refresh_lfm_status(self) -> None:
+        api_key, api_secret = self._effective_lastfm_creds()
         sk = credentials.normalize_secret(self.settings.get("lastfm_session_key", ""))
         user = str(self.settings.get("lastfm_username", "") or "").strip()
+        has_creds = bool(
+            api_key
+            and api_secret
+            and not credentials.secret_problem(api_key)
+            and not credentials.secret_problem(api_secret)
+        )
+        sk_valid = bool(sk and not credentials.secret_problem(sk))
+
         if self._lastfm_stale_error:
             self.lfm_status_var.set("Session expired — reconnect")
             self.auth_step1_btn.configure(text="1. Reconnect Last.fm")
             self.message.set(f"Last.fm needs reconnect: {self._lastfm_stale_error}")
-            self.verify_lfm_btn.configure(state="normal" if sk else "disabled")
+            self.verify_lfm_btn.configure(state="normal" if (sk_valid and has_creds) else "disabled")
             self.disconnect_lfm_btn.configure(state="normal" if sk else "disabled")
-        elif sk:
+        elif sk_valid and has_creds:
             self.lfm_status_var.set(f"Connected as @{user}" if user else "Connected")
             self.auth_step1_btn.configure(text="1. Reconnect Last.fm")
             self.verify_lfm_btn.configure(state="normal")
+            self.disconnect_lfm_btn.configure(state="normal")
+        elif sk and not has_creds:
+            self.lfm_status_var.set("Missing API credentials")
+            self.auth_step1_btn.configure(text="1. Authorize Last.fm")
+            self.verify_lfm_btn.configure(state="disabled")
             self.disconnect_lfm_btn.configure(state="normal")
         else:
             self.lfm_status_var.set("Not connected")
@@ -1027,14 +1058,16 @@ class SetupDialog(tk.Toplevel):
             self.settings["lastfm_api_key"] = api_key
             self.settings["lastfm_api_secret"] = api_secret
             self.settings["lastfm_use_custom_credentials"] = True
+            self.settings["lastfm_session_mode"] = "custom"
         else:
             self.settings["lastfm_use_custom_credentials"] = False
+            self.settings["lastfm_session_mode"] = "bundled"
         self.settings["lastfm_session_key"] = session_key
         self.settings["lastfm_username"] = username
         self.on_save(self.settings)
         self._refresh_lfm_status()
-        self.lfm_status_lbl.configure(foreground=self.palette.muted)
-        self.message_lbl.configure(foreground=self.palette.muted)
+        self.lfm_status_lbl.configure(foreground=self.palette.ok)
+        self.message_lbl.configure(foreground=self.palette.ok)
         who = f" as @{username}" if username else ""
         self.message.set(f"Last.fm connected{who} and ready to scrobble.")
 
@@ -1081,12 +1114,44 @@ class SetupDialog(tk.Toplevel):
         settings_module.clear_secret("lastfm_session_key")
         self.settings["lastfm_session_key"] = ""
         self.settings["lastfm_username"] = ""
+        self.settings["lastfm_session_mode"] = ""
         self._lastfm_stale_error = None
         self.on_save(self.settings)
         self._refresh_lfm_status()
         self.lfm_status_lbl.configure(foreground=self.palette.muted)
         self.message_lbl.configure(foreground=self.palette.muted)
         self.message.set("Disconnected Last.fm session.")
+
+    def _verify_lb_token(self) -> None:
+        from .scrobble.listenbrainz import ListenBrainz
+
+        token = credentials.normalize_secret(self.lb_token.get())
+        server_url = self.lb_url.get().strip()
+        if not token:
+            self.message_lbl.configure(foreground=self.palette.error)
+            self.message.set("Enter a ListenBrainz user token first.")
+            return
+        self.verify_lb_btn.configure(state="disabled")
+        self.message_lbl.configure(foreground=self.palette.muted)
+        self.message.set("Checking ListenBrainz token…")
+
+        def worker() -> None:
+            lb = ListenBrainz(token=token, server_url=server_url)
+            ok, username, err = lb.verify_token()
+            lb.close()
+            schedule_after(self, self._on_lb_verify_done, ok, username or "", err or "")
+
+        threading.Thread(target=worker, daemon=True, name="lb-verify").start()
+
+    def _on_lb_verify_done(self, ok: bool, username: str, error: str) -> None:
+        self.verify_lb_btn.configure(state="normal")
+        if ok:
+            self.message_lbl.configure(foreground=self.palette.ok)
+            who = f" (@{username})" if username else ""
+            self.message.set(f"ListenBrainz token verified{who}.")
+        else:
+            self.message_lbl.configure(foreground=self.palette.error)
+            self.message.set(f"ListenBrainz check failed: {error}")
 
 
 # ================================================================ Main Window
@@ -1107,6 +1172,7 @@ class EggCreamWindow:
         self._shut_down = False
         self._error_message: str | None = None
         self._lastfm_stale_error: str | None = None
+        self._stale_session_key: str | None = None
         self._history: list[Recognition] = []
         self._selected_track: Recognition | None = None
         self._scrobble_count = 0
@@ -1114,16 +1180,18 @@ class EggCreamWindow:
         self._setup_dialog: SetupDialog | None = None
         self._history_dialog: HistoryDialog | None = None
 
+        theme_module.enable_dpi_awareness()
         self.root = tk.Tk()
+        self._dpi_scale = theme_module.apply_tk_scaling(self.root)
         self.root.title("Chocolate Egg Cream")
         self.root.resizable(False, False)
         self.root.protocol("WM_DELETE_WINDOW", self.close)
         self._icon_ref = _apply_app_icon(self.root)
-        self._mark_ref = _load_header_mark()
+        self._mark_ref = _load_header_mark(self._dpi_scale)
 
         self.style = ttk.Style(self.root)
-        self.song_var = tk.StringVar(value="Press Start, then play your audio")
-        self.status_var = tk.StringVar(value="○  stopped")
+        self.song_var = tk.StringVar(value="Not listening")
+        self.status_var = tk.StringVar(value="○  Stopped · Click Start to identify playing audio")
         self.hint_var = tk.StringVar(value="")
         self.services_var = tk.StringVar(value=self._services_text())
         self.stale_var = tk.StringVar(value="")
@@ -1360,7 +1428,9 @@ class EggCreamWindow:
 
     def _apply_theme(self, p: theme_module.Palette) -> None:
         self.palette = p
-        theme_module.configure_ttk_styles(self.style, p, FONT)
+        theme_module.configure_ttk_styles(
+            self.style, p, FONT, scale=self._dpi_scale, root=self.root
+        )
         self.root.configure(background=p.bg)
         for f in self._themed_frames:
             f.configure(background=p.bg)
@@ -1455,12 +1525,14 @@ class EggCreamWindow:
 
     def _save_settings(self, settings: dict) -> None:
         settings_module.save(settings)
-        # Clear stale alert if Last.fm was reconnected or disabled
+        # Clear stale alert ONLY if Last.fm was disabled or a new session key was stored.
+        new_sk = credentials.normalize_secret(settings.get("lastfm_session_key"))
         if self._lastfm_stale_error and (
             "lastfm" not in settings.get("enabled_services", [])
-            or settings.get("lastfm_session_key")
+            or (new_sk and new_sk != self._stale_session_key)
         ):
             self._lastfm_stale_error = None
+            self._stale_session_key = None
             self.stale_banner.grid_remove()
 
         if self.engine is not None and self.loop is not None:
@@ -1585,7 +1657,9 @@ class EggCreamWindow:
         try:
             import ctypes
 
-            return ctypes.windll.user32.GetParent(self.root.winfo_id()) or self.root.winfo_id()
+            winfo = int(self.root.winfo_id())
+            user32 = ctypes.windll.user32
+            return int(user32.GetAncestor(winfo, 2) or user32.GetParent(winfo) or winfo)
         except Exception:  # noqa: BLE001
             return None
 
@@ -1645,25 +1719,35 @@ class EggCreamWindow:
         if self.engine is not None and self.engine.running:
             return
         self._error_message = None
-        self.status_label.configure(foreground=self.palette.muted)
+        self.status_label.configure(foreground=self.palette.accent)
         self._start_engine_thread()
         if self.engine is None:
             return
         self.start_button.configure(state="disabled")
         self.stop_button.configure(state="normal")
-        self.status_var.set("●  starting system audio capture…")
+        self.status_var.set("●  Starting audio capture…")
+        if self.engine.current is None and not self._history:
+            self.song_var.set("Listening…")
+            self.song_label.configure(foreground=self.palette.muted)
         self._call_engine(self.engine.start())
 
     def stop(self) -> None:
         if self.engine is None or not self.engine.running:
             self.start_button.configure(state="normal")
             self.stop_button.configure(state="disabled")
-            self.status_var.set("○  stopped")
+            self.status_label.configure(foreground=self.palette.muted)
+            if self._history:
+                self.status_var.set("○  Stopped")
+            else:
+                self.song_var.set("Not listening")
+                self.song_label.configure(foreground=self.palette.fg)
+                self.status_var.set("○  Stopped · Click Start to identify playing audio")
             return
         self._call_engine(self.engine.stop())
         self.start_button.configure(state="normal")
         self.stop_button.configure(state="disabled")
-        self.status_var.set("○  stopped")
+        self.status_label.configure(foreground=self.palette.muted)
+        self.status_var.set("○  Stopped")
 
     def close(self) -> None:
         if self._closing:
@@ -1675,6 +1759,12 @@ class EggCreamWindow:
             except Exception:  # noqa: BLE001
                 pass
             self._poll_id = None
+        # Release OS media session on the owner UI thread before destroying the HWND.
+        if self.engine is not None and self.engine.external_session is not None:
+            try:
+                self.engine.external_session.close()
+            except Exception:  # noqa: BLE001
+                pass
         try:
             self.root.quit()
             self.root.destroy()
@@ -1745,25 +1835,38 @@ class EggCreamWindow:
         elif kind == "lastfm_stale":
             detail = str(payload) if payload else "Invalid session key"
             self._lastfm_stale_error = detail
+            self._stale_session_key = credentials.normalize_secret(
+                self.settings.get("lastfm_session_key")
+            )
             self.stale_var.set(f"Last.fm session expired ({detail})")
             self.stale_banner.grid()
             self.services_var.set(self._services_text())
         elif kind == "started":
             self._error_message = None
-            self.status_label.configure(foreground=self.palette.muted)
+            self.status_label.configure(foreground=self.palette.accent)
             self.start_button.configure(state="disabled")
             self.stop_button.configure(state="normal")
-            self.status_var.set("●  listening for music…")
+            self.status_var.set("●  Listening")
+            if self.engine is None or self.engine.current is None:
+                self.song_var.set("Waiting for music…")
+                self.song_label.configure(foreground=self.palette.muted)
         elif kind == "stopped":
             self.start_button.configure(state="normal")
             self.stop_button.configure(state="disabled")
+            self.status_label.configure(foreground=self.palette.muted)
             if not self._error_message:
-                self.status_var.set("○  stopped")
+                if self._history:
+                    self.status_var.set("○  Stopped")
+                    self.song_label.configure(foreground=self.palette.fg)
+                else:
+                    self.song_var.set("Not listening")
+                    self.song_label.configure(foreground=self.palette.fg)
+                    self.status_var.set("○  Stopped · Click Start to identify playing audio")
         elif kind == "error":
             detail = str(payload) if payload else "Something went wrong — see the log."
             self._error_message = detail
             self.status_label.configure(foreground=self.palette.error)
-            self.status_var.set(detail)
+            self.status_var.set(f"✕  {detail}")
             self.start_button.configure(state="normal")
             self.stop_button.configure(state="disabled")
 
@@ -1779,25 +1882,43 @@ class EggCreamWindow:
         backoff = engine.recognizer_backoff
         if track is None:
             if backoff > 0:
+                self.status_label.configure(foreground=self.palette.error)
                 self.status_var.set(
-                    f"●  recognition unavailable · retrying in {int(backoff) + 1}s"
+                    f"●  Recognition unavailable · retrying in {int(backoff) + 1}s"
                 )
+                self.song_var.set("Waiting for recognition service…")
+                self.song_label.configure(foreground=self.palette.muted)
             elif candidate is not None:
-                self.status_var.set(f"●  hearing: {candidate.label} (confirming…)")
+                self.status_label.configure(foreground=self.palette.accent)
+                self.status_var.set("●  Confirming…")
+                self.song_var.set(candidate.label)
+                self.song_label.configure(foreground=self.palette.muted)
             elif engine.heard_audio is False:
-                self.status_var.set("●  listening · quiet")
+                self.status_label.configure(foreground=self.palette.muted)
+                self.status_var.set("●  Listening · Quiet")
+                self.song_var.set("No audio detected")
+                self.song_label.configure(foreground=self.palette.muted)
             else:
-                self.status_var.set("●  listening…")
+                self.status_label.configure(foreground=self.palette.accent)
+                self.status_var.set("●  Listening")
+                self.song_var.set("Identifying playing audio…")
+                self.song_label.configure(foreground=self.palette.muted)
             return
 
-        base = f"●  listening · {format_time(engine.playtime)}"
+        self.song_var.set(track.label)
+        self.song_label.configure(foreground=self.palette.fg)
+        base = f"●  Confirmed · {format_time(engine.playtime)}"
         if backoff > 0:
+            self.status_label.configure(foreground=self.palette.error)
             self.status_var.set(f"{base} · retrying in {int(backoff) + 1}s")
         elif candidate is not None and candidate.identity != track.identity:
-            self.status_var.set(f"{base} · next: {candidate.label} (confirming…)")
+            self.status_label.configure(foreground=self.palette.accent)
+            self.status_var.set(f"{base} · Next: {candidate.label} (confirming…)")
         elif engine.heard_audio is False:
-            self.status_var.set(f"{base} · quiet")
+            self.status_label.configure(foreground=self.palette.muted)
+            self.status_var.set(f"{base} · Quiet")
         else:
+            self.status_label.configure(foreground=self.palette.accent)
             self.status_var.set(base)
 
     # --------------------------------------------------------------- main
@@ -1809,6 +1930,7 @@ class EggCreamWindow:
 
 def run(settings: dict) -> int:
     """Open the window."""
+    external_module.ensure_windows_app_identity()
     window = EggCreamWindow(settings)
     window.run()
     return 0

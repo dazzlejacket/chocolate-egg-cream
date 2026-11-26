@@ -160,9 +160,10 @@ class EggCream:
 
     def reload_settings(self, settings: dict) -> None:
         """Apply updated settings (e.g. from Setup) without restarting the app."""
-        self.settings = settings
+        self.settings = dict(settings)
+        self._last_retry_at = 0.0
         old_scrobblers = self.scrobblers
-        self.scrobblers = self._build_scrobblers(settings)
+        self.scrobblers = self._build_scrobblers(self.settings)
         for old in old_scrobblers:
             close_fn = getattr(old, "close", None)
             if callable(close_fn):
@@ -171,7 +172,7 @@ class EggCream:
                 except Exception:  # noqa: BLE001
                     pass
 
-        want_external = bool(settings.get("external_scrobbler"))
+        want_external = bool(self.settings.get("external_scrobbler"))
         if not want_external and self.external_session is not None:
             try:
                 self.external_session.close()
@@ -179,9 +180,11 @@ class EggCream:
                 pass
             self.external_session = None
         elif want_external and self.external_session is None:
-            self.external_session = self._build_external_session(settings)
+            self.external_session = self._build_external_session(self.settings)
+            if self._running and self.tracks.current is not None:
+                self._now_playing_for = None
 
-        max_skew = float(settings.get("max_skew", 0) or 0)
+        max_skew = float(self.settings.get("max_skew", 0) or 0)
         if hasattr(self.recognizer, "max_skew"):
             self.recognizer.max_skew = max_skew if max_skew > 0 else None
 
@@ -370,6 +373,14 @@ class EggCream:
                                 type(exc).__name__,
                                 str(exc)[:160],
                             )
+                elif self._now_playing_for is not None:
+                    self._now_playing_for = None
+                    self._last_now_playing_at = None
+                    if self.external_session is not None and self.external_session.active:
+                        try:
+                            await asyncio.to_thread(self.external_session.clear)
+                        except Exception as exc:  # noqa: BLE001
+                            log.warning("External media session clear failed: %s", exc)
 
                 elapsed = time.time() - started
                 await asyncio.sleep(max(0.0, interval - elapsed))
@@ -717,7 +728,7 @@ class EggCream:
                 del self.history[25:]
         log.info("Now playing: %s", track.label)
 
-        if self.external_session is not None:
+        if self.external_session is not None and (is_new or not self.external_session.active):
             try:
                 ok_ext = await asyncio.to_thread(
                     self.external_session.update_now_playing,
@@ -726,6 +737,7 @@ class EggCream:
                     album=track.album,
                     duration=track.duration,
                     track_id=track.identity,
+                    position=max(0.0, float(self.tracks.playtime)),
                 )
                 if not ok_ext and self.external_session.last_error:
                     log.warning(

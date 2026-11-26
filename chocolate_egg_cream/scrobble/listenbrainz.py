@@ -205,5 +205,49 @@ class ListenBrainz:
         self.last_error = None
         return True
 
+    def verify_token(self) -> tuple[bool, str | None, str | None]:
+        """Verify the ListenBrainz user token against `/1/validate-token`.
+
+        Returns `(ok, username, error_message)`.
+        """
+        if not self.configured:
+            err = self.problem or "not configured"
+            self.last_error = err
+            return False, None, err
+
+        base = self.submit_url
+        if base.endswith(f"/{SUBMIT_PATH}"):
+            url = base[: -len(SUBMIT_PATH)] + "validate-token"
+        else:
+            url = f"{API_ROOT}validate-token"
+
+        try:
+            response = self._session.get(
+                url, headers=self._headers(), timeout=self.timeout
+            )
+        except (requests.RequestException, UnicodeEncodeError, ValueError) as exc:
+            self.last_error = f"{type(exc).__name__}: {str(exc)[:160]}"
+            return False, None, self.last_error
+
+        if response.status_code >= 400:
+            detail = " ".join(response.text.split())[:160]
+            self.last_error = f"HTTP {response.status_code}" + (f": {detail}" if detail else "")
+            return False, None, self.last_error
+
+        try:
+            body = response.json()
+        except ValueError:
+            self.last_error = f"non-JSON response (HTTP {response.status_code})"
+            return False, None, self.last_error
+
+        if isinstance(body, dict) and body.get("valid"):
+            user = str(body.get("user_name") or "").strip() or None
+            self.last_error = None
+            return True, user, None
+
+        msg = str((body or {}).get("message") or "Invalid token")
+        self.last_error = msg
+        return False, None, msg
+
     def close(self) -> None:
         self._session.close()

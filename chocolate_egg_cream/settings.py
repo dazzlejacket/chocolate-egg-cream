@@ -27,6 +27,7 @@ DEFAULTS: dict[str, Any] = {
     "lastfm_session_key": "",
     "lastfm_username": "",
     "lastfm_use_custom_credentials": False,
+    "lastfm_session_mode": "",
     # ListenBrainz (and compatible servers such as Multi-Scrobbler)
     "listenbrainz_token": "",
     "listenbrainz_url": "",

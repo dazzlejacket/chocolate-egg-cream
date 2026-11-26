@@ -54,7 +54,7 @@ if (ROOT / "chocolate_egg_cream" / "_bundled_lastfm.py").is_file():
 
 # Bundle tiny runtime window/header icon assets (platform-minimal).
 assets_dir = ROOT / "chocolate_egg_cream" / "assets"
-for fname in ("icon-32.png", "icon-64.png"):
+for fname in ("icon-32.png", "icon-48.png", "icon-64.png", "icon-128.png"):
     fpath = assets_dir / fname
     if fpath.is_file():
         datas.append((str(fpath), "chocolate_egg_cream/assets"))
@@ -157,6 +157,7 @@ if sys.platform.startswith("linux"):
 pyz = PYZ(a.pure)
 
 WIN_ICON = ROOT / "packaging" / "icons" / "chocolate-egg-cream.ico"
+WIN_MANIFEST = ROOT / "packaging" / "chocolate_egg_cream.manifest"
 MAC_ICON = ROOT / "packaging" / "icons" / "chocolate-egg-cream.icns"
 
 if sys.platform == "win32":
@@ -168,6 +169,7 @@ if sys.platform == "win32":
         [],
         name=APP_NAME,
         icon=str(WIN_ICON) if WIN_ICON.is_file() else None,
+        manifest=str(WIN_MANIFEST) if WIN_MANIFEST.is_file() else None,
         debug=False,
         bootloader_ignore_signals=False,
         strip=False,

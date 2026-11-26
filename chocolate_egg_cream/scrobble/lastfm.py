@@ -185,6 +185,7 @@ class LastFM:
             raise RuntimeError("Last.fm did not return a session key")
         self.session_key = key
         self.username = user
+        self._problems["session key"] = credentials.secret_problem(self.session_key)
         self.session_stale = False
         self.last_error = None
         self.last_error_code = None
@@ -332,6 +333,27 @@ class LastFM:
             self.last_error = f"non-JSON response (HTTP {response.status_code})"
             log.warning("Last.fm returned a non-JSON response (HTTP %s)", response.status_code)
             return False
+
+        # For track.scrobble, Last.fm can return HTTP 200 with ignored=1.
+        if params.get("method") == "track.scrobble" and isinstance(body.get("scrobbles"), dict):
+            scrobbles_obj = body["scrobbles"]
+            attr = scrobbles_obj.get("@attr") or {}
+            try:
+                accepted = int(attr.get("accepted", 1))
+                ignored = int(attr.get("ignored", 0))
+            except (TypeError, ValueError):
+                accepted, ignored = 1, 0
+            if accepted == 0 and ignored > 0:
+                item = scrobbles_obj.get("scrobble")
+                if isinstance(item, list) and item:
+                    item = item[0]
+                ign = (item or {}).get("ignoredMessage") if isinstance(item, dict) else {}
+                ign_code = (ign or {}).get("code", "")
+                ign_text = (ign or {}).get("#text", "") or "Scrobble ignored by Last.fm"
+                self.last_error_code = None
+                self.last_error = f"ignored ({ign_code}): {ign_text}" if ign_code else ign_text
+                log.warning("Last.fm ignored scrobble: %s", self.last_error)
+                return False
 
         self.last_error = None
         self.last_error_code = None

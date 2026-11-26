@@ -78,9 +78,9 @@ The window stays deliberately small:
   https://listenbrainz.org/settings/ into **Setup**. Optionally set a custom
   **Server URL** for Multi-Scrobbler or self-hosted ListenBrainz-compatible
   servers.
-- **External scrobbler mode (optional)**: Publishes confirmed Now Playing
-  metadata to **Windows SMTC** or **Linux MPRIS2** (compatible with Pano
-  Scrobbler) without playing fake audio or interfering with other media
+- **External media session (optional)**: Publishes confirmed Now Playing
+  metadata, playback status, and timeline to **Windows SMTC** or **Linux
+  MPRIS2** without playing fake audio or interfering with other media
   sessions. *(Not enabled on macOS because `MPNowPlayingInfoCenter` is a single
   global slot that would hijack media keys from your active player.)*
 - **Automatic local history & retries**: Every eligible completed listen is
