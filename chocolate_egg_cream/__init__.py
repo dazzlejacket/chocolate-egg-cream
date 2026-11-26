@@ -1,6 +1,6 @@
 """Chocolate Egg Cream: identify music playing on the computer and scrobble it."""
 
-__version__ = "1.0.1"
+__version__ = "1.1.0"
 
 # Point every HTTP stack at one explicit CA bundle before anything opens a
 # socket. Packaged builds have no usable system certificate store for the

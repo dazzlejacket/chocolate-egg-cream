@@ -25,10 +25,17 @@ DEFAULTS: dict[str, Any] = {
     "lastfm_api_key": "",
     "lastfm_api_secret": "",
     "lastfm_session_key": "",
-    # ListenBrainz
+    "lastfm_username": "",
+    "lastfm_use_custom_credentials": False,
+    # ListenBrainz (and compatible servers such as Multi-Scrobbler)
     "listenbrainz_token": "",
+    "listenbrainz_url": "",
     # Which services to submit to: any of "lastfm" and "listenbrainz".
     "enabled_services": ["lastfm", "listenbrainz"],
+    # Optional external scrobbler mode (Windows SMTC / Linux MPRIS).
+    "external_scrobbler": False,
+    # Appearance: "system", "light", or "dark".
+    "theme": "system",
     # Recognition provider ("shazam" by default).
     "recognition_provider": "shazam",
     # macOS capture backend: "auto" (Core Audio Taps on 14.2+, SCK on 13),
@@ -50,6 +57,7 @@ DEFAULTS: dict[str, Any] = {
 }
 
 KNOWN_SERVICES = ("lastfm", "listenbrainz")
+KNOWN_THEMES = ("system", "light", "dark")
 
 _INT_SETTINGS = (
     "interval_seconds",
@@ -58,6 +66,7 @@ _INT_SETTINGS = (
     "min_play_seconds",
 )
 _FLOAT_SETTINGS = ("max_skew",)
+_BOOL_SETTINGS = ("lastfm_use_custom_credentials", "external_scrobbler")
 _LIST_SETTINGS = ("enabled_services", "scrobble_events", "scrobbled")
 
 
@@ -145,6 +154,13 @@ def validate(data: dict[str, Any]) -> dict[str, Any]:
             except (TypeError, ValueError):
                 log.warning("Setting %s was %r; using %r", key, checked[key], DEFAULTS[key])
                 checked[key] = DEFAULTS[key]
+    for key in _BOOL_SETTINGS:
+        if key in checked:
+            val = checked[key]
+            if isinstance(val, str):
+                checked[key] = val.strip().lower() in ("1", "true", "yes", "on")
+            else:
+                checked[key] = bool(val)
     for key in _LIST_SETTINGS:
         if key in checked and isinstance(checked[key], str):
             checked[key] = [checked[key]]
@@ -155,7 +171,10 @@ def validate(data: dict[str, Any]) -> dict[str, Any]:
     enabled = checked.get("enabled_services") or []
     checked["enabled_services"] = [name for name in enabled if name in KNOWN_SERVICES]
 
-    for key in ("lastfm_api_key", *credentials.SECRET_KEYS):
+    theme = str(checked.get("theme") or "system").strip().lower()
+    checked["theme"] = theme if theme in KNOWN_THEMES else "system"
+
+    for key in ("lastfm_api_key", "lastfm_username", "listenbrainz_url", *credentials.SECRET_KEYS):
         checked[key] = str(checked.get(key) or "")
 
     return checked

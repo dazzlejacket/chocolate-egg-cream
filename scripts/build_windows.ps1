@@ -19,9 +19,27 @@ Write-Host "Building Chocolate Egg Cream $Version for Windows x64..."
 
 Remove-Item -Recurse -Force -ErrorAction SilentlyContinue "build", "dist"
 
-& $PythonExe -m PyInstaller --clean --noconfirm "packaging/chocolate_egg_cream.spec"
-if ($LASTEXITCODE -ne 0) {
-    throw "PyInstaller build failed with exit code $LASTEXITCODE"
+# Optional build-time injection of dedicated Chocolate Egg Cream Last.fm app credentials.
+# Never committed to git; removed immediately after PyInstaller finishes.
+$BundledCredsFile = Join-Path $RepoRoot "chocolate_egg_cream\_bundled_lastfm.py"
+$CreatedCreds = $false
+if ($env:CEC_LASTFM_API_KEY -and $env:CEC_LASTFM_API_SECRET) {
+    $k = $env:CEC_LASTFM_API_KEY.Trim().Replace('\', '\\').Replace('"', '\"')
+    $s = $env:CEC_LASTFM_API_SECRET.Trim().Replace('\', '\\').Replace('"', '\"')
+    "API_KEY = `"$k`"`nAPI_SECRET = `"$s`"`n" | Set-Content -Encoding UTF8 $BundledCredsFile
+    $CreatedCreds = $true
+    Write-Host "Injected build-time Last.fm app credentials (gitignored)."
+}
+
+try {
+    & $PythonExe -m PyInstaller --clean --noconfirm "packaging/chocolate_egg_cream.spec"
+    if ($LASTEXITCODE -ne 0) {
+        throw "PyInstaller build failed with exit code $LASTEXITCODE"
+    }
+} finally {
+    if ($CreatedCreds -and (Test-Path $BundledCredsFile)) {
+        Remove-Item -Force $BundledCredsFile
+    }
 }
 
 $BuiltExe = Join-Path $RepoRoot "dist\Chocolate Egg Cream.exe"

@@ -10,5 +10,8 @@ dist/
 tools/SystemAudioCapture
 settings.json
 eggcream.log
+history.jsonl
+pending_scrobbles.json
+chocolate_egg_cream/_bundled_lastfm.py
 .DS_Store
 Thumbs.db

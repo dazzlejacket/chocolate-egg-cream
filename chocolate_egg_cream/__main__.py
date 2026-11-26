@@ -84,12 +84,12 @@ async def run_test(config: dict) -> int:
 
 def run_lastfm_auth(config: dict) -> int:
     """Walk the user through the Last.fm authorisation."""
+    from .scrobble import lastfm_app
     from .scrobble.lastfm import LastFM
 
-    api_key = config.get("lastfm_api_key", "")
-    api_secret = config.get("lastfm_api_secret", "")
+    api_key, api_secret, _custom = lastfm_app.resolve_credentials(config)
     if not api_key or not api_secret:
-        print("Last.fm needs an API key and secret.", flush=True)
+        print("Last.fm needs an API key and secret (none bundled in this build).", flush=True)
         print(
             "Create an API account at https://www.last.fm/api/account/create and then:\n"
             "  python -m chocolate_egg_cream set lastfm_api_key <key>\n"
@@ -115,14 +115,17 @@ def run_lastfm_auth(config: dict) -> int:
     input("Press Enter here once you have allowed the app in your browser... ")
 
     try:
-        session_key = lastfm.exchange_token(token)
+        session_key, username = lastfm.exchange_token_with_user(token)
     except Exception as exc:  # noqa: BLE001
         print(f"Last.fm refused the token: {exc}", flush=True)
         return 1
 
     config["lastfm_session_key"] = session_key
+    if username:
+        config["lastfm_username"] = username
     settings_module.save(config)
-    print("Last.fm is authorised. You can run the app now.\n", flush=True)
+    who = f" as @{username}" if username else ""
+    print(f"Last.fm is authorised{who}. You can run the app now.\n", flush=True)
     return 0
 
 
@@ -408,6 +411,14 @@ def main() -> int:
             "confirmations_required",
         ):
             config[key] = int(value)
+        elif key in ("lastfm_use_custom_credentials", "external_scrobbler"):
+            config[key] = value.strip().lower() in ("1", "true", "yes", "on")
+        elif key == "theme":
+            norm = value.strip().lower()
+            if norm not in settings_module.KNOWN_THEMES:
+                print(f"theme must be one of: {', '.join(settings_module.KNOWN_THEMES)}", flush=True)
+                return 2
+            config[key] = norm
         else:
             config[key] = value
         settings_module.save(config)

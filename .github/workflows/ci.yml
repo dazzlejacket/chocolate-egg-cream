@@ -45,6 +45,9 @@ jobs:
       - name: Run v1.0.1 regression tests
         run: python tests/test_regressions.py
 
+      - name: Run v1.1.0 feature tests
+        run: python tests/test_v110.py
+
   package:
     # Build the real artifact on every push and run the packaged executable's
     # own `verify` command (real TLS through requests + aiohttp, CA bundle,
@@ -86,14 +89,23 @@ jobs:
       - name: Build Windows EXE (with packaged verify gate)
         if: runner.os == 'Windows'
         shell: pwsh
+        env:
+          CEC_LASTFM_API_KEY: ${{ secrets.CEC_LASTFM_API_KEY }}
+          CEC_LASTFM_API_SECRET: ${{ secrets.CEC_LASTFM_API_SECRET }}
         run: pwsh -File scripts/build_windows.ps1 -PythonExe python
 
       - name: Build macOS app + DMG (with packaged verify gate)
         if: runner.os == 'macOS'
+        env:
+          CEC_LASTFM_API_KEY: ${{ secrets.CEC_LASTFM_API_KEY }}
+          CEC_LASTFM_API_SECRET: ${{ secrets.CEC_LASTFM_API_SECRET }}
         run: bash scripts/build_macos.sh
 
       - name: Build Linux AppImage (with packaged verify gate)
         if: runner.os == 'Linux'
+        env:
+          CEC_LASTFM_API_KEY: ${{ secrets.CEC_LASTFM_API_KEY }}
+          CEC_LASTFM_API_SECRET: ${{ secrets.CEC_LASTFM_API_SECRET }}
         run: bash scripts/build_linux.sh
 
       - name: Upload packaged artifact

@@ -44,7 +44,22 @@ file tools/SystemAudioCapture
 
 # 2. Build Chocolate Egg Cream.app with PyInstaller.
 rm -rf build dist
+
+BUNDLED_CREDS="chocolate_egg_cream/_bundled_lastfm.py"
+cleanup_creds() { [ -f "$BUNDLED_CREDS" ] && rm -f "$BUNDLED_CREDS"; }
+trap cleanup_creds EXIT
+if [ -n "${CEC_LASTFM_API_KEY:-}" ] && [ -n "${CEC_LASTFM_API_SECRET:-}" ]; then
+  "$PYTHON" - "$BUNDLED_CREDS" <<'PY'
+import os, pathlib, sys
+k = os.environ["CEC_LASTFM_API_KEY"].strip()
+s = os.environ["CEC_LASTFM_API_SECRET"].strip()
+pathlib.Path(sys.argv[1]).write_text(f"API_KEY = {k!r}\nAPI_SECRET = {s!r}\n", encoding="utf-8")
+PY
+  echo "Injected build-time Last.fm app credentials (gitignored)."
+fi
+
 "$PYTHON" -m PyInstaller --clean --noconfirm packaging/chocolate_egg_cream.spec
+cleanup_creds
 
 APP_BUNDLE="dist/Chocolate Egg Cream.app"
 HELPER_IN_APP="$APP_BUNDLE/Contents/MacOS/SystemAudioCapture"

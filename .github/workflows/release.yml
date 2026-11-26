@@ -35,9 +35,13 @@ jobs:
           python tests/test_core.py
           python tests/test_scrobble_flow.py
           python tests/test_regressions.py
+          python tests/test_v110.py
 
       - name: Build Windows standalone EXE
         shell: pwsh
+        env:
+          CEC_LASTFM_API_KEY: ${{ secrets.CEC_LASTFM_API_KEY }}
+          CEC_LASTFM_API_SECRET: ${{ secrets.CEC_LASTFM_API_SECRET }}
         run: pwsh -File scripts/build_windows.ps1 -PythonExe python
 
       - name: Upload Windows artifact
@@ -74,6 +78,7 @@ jobs:
           python tests/test_core.py
           python tests/test_scrobble_flow.py
           python tests/test_regressions.py
+          python tests/test_v110.py
 
       - name: Import signing certificate (optional)
         if: env.APPLE_CERT_P12_BASE64 != ''
@@ -94,6 +99,8 @@ jobs:
       - name: Build macOS .app and .dmg
         env:
           PYTHON: python
+          CEC_LASTFM_API_KEY: ${{ secrets.CEC_LASTFM_API_KEY }}
+          CEC_LASTFM_API_SECRET: ${{ secrets.CEC_LASTFM_API_SECRET }}
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
@@ -135,10 +142,13 @@ jobs:
           python tests/test_core.py
           python tests/test_scrobble_flow.py
           python tests/test_regressions.py
+          python tests/test_v110.py
 
       - name: Build Linux AppImage and portable archive
         env:
           PYTHON: python
+          CEC_LASTFM_API_KEY: ${{ secrets.CEC_LASTFM_API_KEY }}
+          CEC_LASTFM_API_SECRET: ${{ secrets.CEC_LASTFM_API_SECRET }}
         run: bash scripts/build_linux.sh
 
       - name: Upload Linux artifact

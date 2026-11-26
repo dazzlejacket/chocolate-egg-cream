@@ -56,18 +56,38 @@ The window stays deliberately small:
 
 - **Start / Stop** — start or stop system audio capture (Stop and Quit release
   the audio device and stop all background work immediately).
+- **Theme** — switch between monochrome **Light**, **Dark**, and **System**
+  themes (remembered across launches).
 - **Copy**, **Lyrics**, **YouTube** — quick actions for the current song or any
-  song selected in **Recent Songs** (language-neutral search, full Unicode
-  support).
-- **Setup…** — configure Last.fm and/or ListenBrainz without editing JSON.
+  song selected in **Recent** (language-neutral search, full Unicode support).
+- **Open Listening History** — view every locally saved listen, retry failed
+  scrobbles, and export to **TXT**, **CSV**, or **JSONL**.
+- **Setup** — connect Last.fm, ListenBrainz (including custom Multi-Scrobbler
+  URLs), and optional external scrobbler mode without editing JSON.
 
-### Scrobbling Setup
+### Scrobbling & External Mode
 
-- **Last.fm**: Create an API account at https://www.last.fm/api/account/create,
-  enter your API key and secret in **Setup…**, click **1. Open Last.fm**, click
-  **Yes, allow access** in your browser, then click **2. Finish auth**.
-- **ListenBrainz**: Create a user token at https://listenbrainz.org/settings/
-  and paste it into **Setup…**.
+- **Last.fm**: Official release builds bundle dedicated Chocolate Egg Cream
+  application credentials — just click **1. Authorize Last.fm**, approve in your
+  browser, and click **2. Finish auth**. Stale or revoked sessions are detected
+  automatically with actual API errors and a quick reconnect prompt. Custom API
+  credentials remain available under **Advanced**. (For local release builds,
+  set `CEC_LASTFM_API_KEY` and `CEC_LASTFM_API_SECRET` at build time; private
+  credentials are never committed to git.)
+- **ListenBrainz**: Paste your user token from
+  https://listenbrainz.org/settings/ into **Setup**. Optionally set a custom
+  **Server URL** for Multi-Scrobbler or self-hosted ListenBrainz-compatible
+  servers.
+- **External scrobbler mode (optional)**: Publishes confirmed Now Playing
+  metadata to **Windows SMTC** or **Linux MPRIS2** (compatible with Pano
+  Scrobbler) without playing fake audio or interfering with other media
+  sessions. *(Not enabled on macOS because `MPNowPlayingInfoCenter` is a single
+  global slot that would hijack media keys from your active player.)*
+- **Automatic local history & retries**: Every eligible completed listen is
+  appended locally to `history.jsonl` (artist, title, album, timestamp,
+  duration, ISRC, and service status) even with no scrobbling accounts
+  configured. Failed scrobbles are preserved in `pending_scrobbles.json` and
+  retried automatically without creating duplicates.
 
 ## Privacy & Security
 

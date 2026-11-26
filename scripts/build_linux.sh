@@ -17,7 +17,22 @@ VERSION="$("$PYTHON" -c "import pathlib, re; t = pathlib.Path('chocolate_egg_cre
 echo "Building Chocolate Egg Cream $VERSION for Linux ($ARCH)..."
 
 rm -rf build dist
+
+BUNDLED_CREDS="chocolate_egg_cream/_bundled_lastfm.py"
+cleanup_creds() { [ -f "$BUNDLED_CREDS" ] && rm -f "$BUNDLED_CREDS"; }
+trap cleanup_creds EXIT
+if [ -n "${CEC_LASTFM_API_KEY:-}" ] && [ -n "${CEC_LASTFM_API_SECRET:-}" ]; then
+  "$PYTHON" - "$BUNDLED_CREDS" <<'PY'
+import os, pathlib, sys
+k = os.environ["CEC_LASTFM_API_KEY"].strip()
+s = os.environ["CEC_LASTFM_API_SECRET"].strip()
+pathlib.Path(sys.argv[1]).write_text(f"API_KEY = {k!r}\nAPI_SECRET = {s!r}\n", encoding="utf-8")
+PY
+  echo "Injected build-time Last.fm app credentials (gitignored)."
+fi
+
 "$PYTHON" -m PyInstaller --clean --noconfirm packaging/chocolate_egg_cream.spec
+cleanup_creds
 
 BUNDLE_DIR="dist/chocolate-egg-cream"
 if [ ! -x "$BUNDLE_DIR/chocolate-egg-cream" ]; then
@@ -68,6 +83,12 @@ mkdir -p "$APPDIR/usr/bin" "$APPDIR/usr/lib/chocolate-egg-cream"
 cp -a "$BUNDLE_DIR/." "$APPDIR/usr/lib/chocolate-egg-cream/"
 cp packaging/linux/chocolate-egg-cream.desktop "$APPDIR/chocolate-egg-cream.desktop"
 cp packaging/linux/chocolate-egg-cream.svg "$APPDIR/chocolate-egg-cream.svg"
+for sz in 16 32 48 64 128 256 512; do
+  if [ -f "packaging/icons/png/icon-${sz}.png" ]; then
+    mkdir -p "$APPDIR/usr/share/icons/hicolor/${sz}x${sz}/apps"
+    cp "packaging/icons/png/icon-${sz}.png" "$APPDIR/usr/share/icons/hicolor/${sz}x${sz}/apps/chocolate-egg-cream.png"
+  fi
+done
 
 cat > "$APPDIR/AppRun" <<'EOF'
 #!/usr/bin/env bash
